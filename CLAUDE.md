@@ -2,8 +2,10 @@
 
 Measuring what agent-written handoff notes leak — and whether an adversary can use it.
 
-**Status: nothing is built yet.** This document is the design. The only files in the repo are this
-one and `README.md`. Sections below describe intent; update them as code lands.
+**Status: scaffold landed (#1); the deterministic core is next.** `main` holds the docs, the uv
+toolchain, and a green test baseline — no canary manifest, no modules, no model-calling code. Issues
+#1–#18 track the build. Sections below describe intent; update them as code lands, and treat a stale
+status line here as a bug.
 
 ## Threat model
 
