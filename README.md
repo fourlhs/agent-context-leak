@@ -118,4 +118,4 @@ Design notes, conventions, and open questions live in `CLAUDE.md`.
 
 ## License
 
-TBD.
+MIT — see [`LICENSE`](LICENSE). One license covers the whole repository, corpus included.
