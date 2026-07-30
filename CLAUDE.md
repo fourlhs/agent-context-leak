@@ -132,12 +132,21 @@ tests/
 1. Branch from `main`, named `issue-<n>-<slug>` — e.g. `issue-5-scoring`
 2. Work that issue and only that issue. If you find adjacent work, open another issue rather than widening the branch
 3. Open a PR whose body says `Closes #<n>`
-4. The other person reviews and approves
+4. The other person reviews (see the note below on self-merging)
 5. Merge to `main`; the issue closes automatically
 
-`main` is protected: direct pushes are rejected, a PR with one approving review is required, and the rule applies to admins too. The one direct push in this repo's history is the commit that established these docs and turned the protection on.
+`main` is protected: direct pushes are rejected, changes must arrive through a PR, force-pushes and
+deletions are blocked, and the rules apply to admins too. The one direct push in this repo's history
+is the commit that established these docs and turned the protection on.
 
-**Two-person deadlock.** GitHub does not allow self-approval, so if one of us is unavailable the other cannot merge. That is the intended tradeoff, not a bug — but the escape hatch is `gh api -X DELETE repos/fourlhs/agent-context-leak/branches/main/protection` to unlock, and re-run the protection command afterwards. Use it and say so in the PR; do not quietly leave `main` unprotected.
+**Approval is a convention here, not a branch rule.** `required_approving_review_count` is **0**, so
+either of us can merge our own PR. That is deliberate: with two people and a one-approval rule,
+GitHub's ban on self-approval means whoever is online alone cannot merge at all, and an evening
+project cannot afford to stall on that.
+
+So: request a review and wait for it when the other person is around. Self-merge when they are not,
+and say in the PR that you did, so the other person knows to read it after the fact. The branch rule
+exists to stop an accidental `git push` to `main` — not to stop you working.
 
 ### What review is for here
 
