@@ -8,8 +8,9 @@ what leaks.
 > agent, or shipped feature.** Every number here describes our own implementation of a common pattern.
 > If you quote a result from this repo, quote that sentence with it.
 
-> **Status: design stage.** The design is settled (see `CLAUDE.md`); the code is not written yet. The
-> reproduction steps below describe the intended interface and do not work today.
+> **Status: scaffold.** The design is settled (see `CLAUDE.md`) and the toolchain is in place —
+> `uv sync` and `uv run pytest` work. The project modules are not written yet, so every reproduction
+> step that names one still describes an intended interface rather than working code.
 
 ## The threat model
 
@@ -75,14 +76,19 @@ the only source of truth.
 
 ## Reproducing
 
-*(Intended interface — not yet implemented.)*
+Tooling is [uv](https://docs.astral.sh/uv/): `pip install uv`. On Windows pip installs the `uv`
+console script to `%APPDATA%\Python\Python313\Scripts`, which is **not** added to `PATH`
+automatically — either add it or run `python -m uv ...` in place of `uv ...` throughout. `uv sync`
+reads the committed `.python-version` and fetches a matching interpreter if you do not have one.
 
 ```sh
-uv sync
+uv sync                                    # .venv + dependencies
+uv run pytest                              # test suite
+
+# Not built yet — the commands below describe the intended interface.
 
 # Deterministic core — no API calls, no network, no key required.
 uv run python scripts/build_fixture.py     # manifest -> fixture/
-uv run pytest                              # T1/T2 scoring + scrubber tests
 
 # Model-calling stages — require ANTHROPIC_API_KEY.
 uv run python -m src.defender --pilot      # 2 transcripts, all 3 conditions
