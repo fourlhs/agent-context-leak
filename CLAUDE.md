@@ -4,11 +4,12 @@ Measuring what agent-written handoff notes leak — and whether an adversary can
 
 **Status: everything up to the pilot gate is built; no model has been called yet.** `main` holds the
 manifest and fixture generator, T1/T2 scoring, the transcript schema with two pilots, the run store
-and cost summariser, the defender (C1/C2/C3), the attacker and the guess-rate control arm — all
-green, all exercised against fake clients. **Total API spend so far: $0.**
+and cost summariser, the defender (C1/C2/C3), the attacker and the control-arm module — all green,
+all exercised against fake clients. **Total API spend so far: $0.**
 
 Not yet built: the C3 scrubber (#6, in review), the remaining ten canaries (#3), the full transcript
-corpus (#8), aggregation (#13), the hook (#16), the writeup (#17).
+corpus (#8), the recorded guess-rate floor (#12 — the module is in, the numbers wait on a run),
+aggregation (#13), the hook (#16), the writeup (#17).
 
 Next is **#14, the pilot gate** — the first thing here that spends money, and a hard stop until it
 reports a measured number.
