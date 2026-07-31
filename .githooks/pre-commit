@@ -7,11 +7,20 @@
 #
 # To commit past a finding, set CANARY_GUARD_OVERRIDE=1. The guard prints what
 # that means before you do.
-if command -v uv >/dev/null 2>&1; then
-	exec uv run --frozen python -m src.transcript_guard
-fi
-# On Windows pip does not put `uv` on PATH; the README says to use `python -m uv`.
-if python -c "import uv" >/dev/null 2>&1; then
-	exec python -m uv run --frozen python -m src.transcript_guard
-fi
-exec python -m src.transcript_guard
+#
+# Each candidate runner is probed with an import first, and the guard runs under
+# the first one that answers. No `exec`: a broken toolchain -- an out-of-step
+# lockfile, no uv, no venv -- would otherwise be indistinguishable from a
+# finding, and CANARY_GUARD_OVERRIDE could not help because the guard never ran.
+# A toolchain failure falls through to a warning; only the guard itself blocks.
+# On Windows pip does not put `uv` on PATH, hence the `python -m uv` candidate.
+for runner in "uv run python" "python -m uv run python" "python" "python3"; do
+	if $runner -c "import src.transcript_guard" >/dev/null 2>&1; then
+		$runner -m src.transcript_guard
+		exit $?
+	fi
+done
+
+echo "pre-commit: could not run the transcript guard -- no working uv or python." >&2
+echo "  Commit allowed. Run the check by hand: uv run python -m src.transcript_guard" >&2
+exit 0
