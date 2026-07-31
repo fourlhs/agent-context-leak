@@ -61,6 +61,14 @@ def test_valid_entry_round_trips(tmp_path):
         # `matched_markers` is one joined cell, so a marker holding the separator
         # turns two markers into three fields in results/.
         ({"referential_markers": ["grep -r | wc"]}, "contains the marker separator"),
+        # T2 asserts a word boundary at each end (#30), so a marker whose own
+        # edge is punctuation can never fire — `PAYMENTS_API_KEY=` is blocked
+        # exactly on `PAYMENTS_API_KEY=xxx`, the shape it was written for. The
+        # symptom is a silently-zero T2 rate for one category. #3 authors ten
+        # more entries against this schema, so it fails at authoring time.
+        ({"referential_markers": ["PAYMENTS_API_KEY="]}, "non-word character"),
+        ({"referential_markers": ["vault/"]}, "non-word character"),
+        ({"referential_markers": [".env.local"]}, "non-word character"),
         ({"context": "unrelated code\n"}, "does not contain"),
         ({"target_file": "/etc/passwd"}, "must be relative"),
         ({"target_file": "../outside.py"}, "must be relative"),

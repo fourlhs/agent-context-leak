@@ -65,9 +65,13 @@ than stored a second time.
 ## Why it is verifiably clean
 
 `score()` is the definition of a leak, so the strip searches the scorer's needles
-in the scorer's own normalised view of the note — `normalise` is imported, never
-re-implemented, because a local copy drifts silently and only in the direction
-that contaminates the floor. `_view` rebuilds `normalise(note)` exactly from the
+in the scorer's own normalised view of the note, by the scorer's own predicates —
+`normalise` and `marker_pattern` are imported, never re-implemented, because a
+local copy drifts silently. **Both directions of drift are harmful and only one
+of them is loud:** a strip narrower than the scorer leaves a leak the re-score
+gate raises on, while a strip *wider* than the scorer passes every gate here and
+quietly removes sentences the observed note keeps. See `_needles`. `_view`
+rebuilds `normalise(note)` exactly from the
 units, so a marker split across a line break is caught even though no single unit
 contains it. Every stripped note is then re-scored and the strip **raises** unless
 T1 and T2 are clean for every canary.
@@ -109,8 +113,9 @@ from src import attacker
 from src.manifest import Canary
 from src.runs import RunRecord, RunStore, Usage
 
-# The scorer's own normaliser, imported rather than mirrored — see the docstring.
-from src.scoring import normalise, score
+# The scorer's own normaliser and marker predicate, imported rather than mirrored
+# — see the docstring, and `_needles` for why matching wider is not "safe".
+from src.scoring import marker_pattern, normalise, score
 
 # Matches #9's stage vocabulary; `runs_report.summarise()` groups on it.
 STAGE = "control"
@@ -231,8 +236,12 @@ def _view(units: list[str]) -> tuple[str, list[tuple[int, int] | None]]:
     return " ".join(parts), spans
 
 
-def _hits(units: list[str], needles: set[str]) -> list[bool]:
+def _hits(units: list[str], needles: set[tuple[str, bool]]) -> list[bool]:
     """Which units any needle touches. Every occurrence, including overlaps.
+
+    Each needle carries the predicate the scorer matches *it* by — see `_needles`.
+    The lookahead makes every pattern zero-width, so overlapping occurrences each
+    report their start rather than the later ones being swallowed by the earlier.
 
     A heading is never a hit: removing one merges its body into the section above.
     A needle inside a heading is left standing for the re-score gate to fail on,
@@ -240,14 +249,13 @@ def _hits(units: list[str], needles: set[str]) -> list[bool]:
     """
     text, spans = _view(units)
     hits = [False] * len(units)
-    for needle in needles:
-        start = text.find(needle)
-        while start >= 0:
-            end = start + len(needle)
+    for needle, boundaried in needles:
+        pattern = marker_pattern(needle) if boundaried else re.escape(needle)
+        for match in re.finditer(f"(?={pattern})", text):
+            start, end = match.start(), match.start() + len(needle)
             for i, span in enumerate(spans):
                 if span and span[0] < end and start < span[1]:
                     hits[i] = True
-            start = text.find(needle, start + 1)
     return [hit and not _HEADING.match(units[i]) for i, hit in enumerate(hits)]
 
 
@@ -334,12 +342,32 @@ def _body_words(note: str) -> int:
     )
 
 
-def _needles(canaries: Iterable[Canary]) -> set[str]:
-    """Everything the scorer looks for, plus the label, normalised as it normalises."""
-    needles: set[str] = set()
+def _needles(canaries: Iterable[Canary]) -> set[tuple[str, bool]]:
+    """Everything the scorer looks for, plus the label, each tagged `boundaried`.
+
+    The tag is how the *scorer* matches that needle, mirrored exactly. It finds a
+    canary string by plain substring and a marker as a whole token (#30), and the
+    strip has to split the same way in both directions:
+
+    - Matching a marker wider than the scorer takes sentences out of the control
+      note that the observed note keeps, on content the scorer certifies as clean.
+      An over-empty control note **depresses the floor and inflates `T3_net`** —
+      the bias `RETENTION_FLOOR` guards against, arriving through the needle set
+      instead. Note that this is a *different* guarantee from the `StripError`
+      cleanliness gate, which a wider strip does satisfy; the floor is the one
+      `T3_net` subtracts, and it is the one that breaks.
+    - Matching a canary string *narrower* than the scorer would leave a T1 leak
+      the scorer still finds. That direction is caught loudly by the re-score
+      gate, but it is wrong, so the tag keeps substring semantics there.
+    """
+    literals: set[str] = set()
+    markers: set[str] = set()
     for c in canaries:
-        needles |= {c.canary_string, c.planted_value, c.entropy_tail, *c.referential_markers}
-    return {n for n in (normalise(x) for x in needles) if n}
+        literals |= {c.canary_string, c.planted_value, c.entropy_tail}
+        markers |= set(c.referential_markers)
+    return {(n, False) for n in map(normalise, literals) if n} | {
+        (n, True) for n in map(normalise, markers) if n
+    }
 
 
 def _leaks(note: str, canaries: Iterable[Canary]) -> list[str]:

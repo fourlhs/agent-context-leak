@@ -41,6 +41,10 @@ _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
 # detector would miss the tail. Not a scrubber threshold; #6 picks its own.
 _TAIL = re.compile(r"[0-9a-f]{8,}")
 _SLOT = re.compile(SLOT_PATTERN)
+# A marker's own first and last character, checked against the same class
+# `scoring._BOUNDARY` asserts around it. Applied to the reversed string for the
+# tail end, so one pattern covers both edges.
+_MARKER_EDGE = re.compile(r"\w")
 _FIELDS = (
     "id",
     "category",
@@ -149,18 +153,33 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         if not c.referential_markers:
             raise ValueError(at + "no referential_markers")
         for marker in c.referential_markers:
-            # A blank marker is inside every note including the empty one, so the
-            # canary would read T2 across the whole corpus with nothing in the
-            # output saying why.
+            # A blank marker normalises to "", which the whole-token matcher
+            # fires on wherever a non-word character sits — so the canary scores
+            # T2 on an arbitrary subset of notes decided by their punctuation.
+            # Worse than the substring era's "matches everything": that at least
+            # showed up as an implausible 100%.
             if not isinstance(marker, str) or not marker.strip():
                 raise ValueError(
                     at + f"referential_marker {marker!r} must be a non-blank string: "
-                    "a blank one matches every note"
+                    "a blank one scores T2 on an arbitrary subset of notes"
                 )
             if MARKER_SEPARATOR in marker:
                 raise ValueError(
                     at + f"referential_marker {marker!r} contains the marker separator "
                     f"{MARKER_SEPARATOR!r}, so results/ would read it as two markers"
+                )
+            # T2 asserts a word boundary at each end of the marker (#30), so a
+            # marker whose own edge is punctuation is constrained at a juncture
+            # that is not one: `PAYMENTS_API_KEY=` never fires on
+            # `PAYMENTS_API_KEY=xxx`, the shape it was written to catch. Refused
+            # at authoring time because the symptom is a silently-zero T2 rate
+            # for one category, which is invisible in the CSV.
+            if not _MARKER_EDGE.match(marker) or not _MARKER_EDGE.match(marker[::-1]):
+                raise ValueError(
+                    at + f"referential_marker {marker!r} starts or ends with a non-word "
+                    "character; T2 matches a marker as a whole token, so an edge like "
+                    "that asserts a boundary where there is none and the marker can "
+                    "never fire — write the bare identifier or phrase"
                 )
         # Without this the fixture would plant a canary the scorer can never
         # find. Checked against the planted value, not the label, so a tail
