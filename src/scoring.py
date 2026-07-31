@@ -1,4 +1,15 @@
-"""T1 verbatim and T2 referential detection over a handoff note.
+"""T1 value-quoting and T2 referential detection over a handoff note.
+
+Two needles per canary. `canary_string` is the *label*: it says which canary a
+match belongs to. The planted value is the label plus its entropy tail, and is
+what `build_fixture.py` actually writes into the fixture — so that, and only
+that, is the T1 needle. `verbatim_label` is a secondary diagnostic: a scrubber
+that strips the high-entropy tail leaves the low-entropy label standing, and
+"the value went, the identifier stayed" is worth reporting. Scoring the label
+as T1 would make T1 read ~100% under C3 and falsify H1 on a boundary we drew.
+
+Deliberate asymmetry: there is no `verbatim_label_case_insensitive`. Three
+booleans is enough — the label column is a diagnostic, not a headline.
 
 Deterministic and stdlib-only: no network, no model calls.
 
@@ -28,8 +39,9 @@ def _normalise(text: str) -> str:
 class CanaryScore:
     canary_id: str
     category: str
-    verbatim: bool
-    verbatim_case_insensitive: bool
+    verbatim_value: bool
+    verbatim_value_case_insensitive: bool
+    verbatim_label: bool
     referential: bool
     matched_markers: tuple[str, ...]
 
@@ -37,8 +49,9 @@ class CanaryScore:
 @dataclass(frozen=True)
 class CategoryTotals:
     canaries: int
-    verbatim: int
-    verbatim_case_insensitive: int
+    verbatim_value: int
+    verbatim_value_case_insensitive: int
+    verbatim_label: int
     referential: int
 
 
@@ -52,8 +65,9 @@ class ScoringResult:
             {
                 "canary_id": s.canary_id,
                 "category": s.category,
-                "verbatim": s.verbatim,
-                "verbatim_case_insensitive": s.verbatim_case_insensitive,
+                "verbatim_value": s.verbatim_value,
+                "verbatim_value_case_insensitive": s.verbatim_value_case_insensitive,
+                "verbatim_label": s.verbatim_label,
                 "referential": s.referential,
                 "matched_markers": MARKER_SEPARATOR.join(s.matched_markers),
             }
@@ -68,8 +82,11 @@ class ScoringResult:
         return {
             category: CategoryTotals(
                 canaries=len(group),
-                verbatim=sum(s.verbatim for s in group),
-                verbatim_case_insensitive=sum(s.verbatim_case_insensitive for s in group),
+                verbatim_value=sum(s.verbatim_value for s in group),
+                verbatim_value_case_insensitive=sum(
+                    s.verbatim_value_case_insensitive for s in group
+                ),
+                verbatim_label=sum(s.verbatim_label for s in group),
                 referential=sum(s.referential for s in group),
             )
             for category, group in groups.items()
@@ -83,17 +100,23 @@ def score(note_text: str, manifest: Iterable[Canary]) -> ScoringResult:
     scores = []
 
     for c in manifest:
-        verbatim = c.canary_string in note_text
+        value = c.planted_value
+        verbatim_value = value in note_text
         markers = tuple(m for m in c.referential_markers if _normalise(m) in normalised)
         scores.append(
             CanaryScore(
                 canary_id=c.id,
                 category=c.category,
-                verbatim=verbatim,
-                verbatim_case_insensitive=c.canary_string.lower() in lowered,
-                # T1 supersedes T2 so the tiers never double-count the same canary.
+                verbatim_value=verbatim_value,
+                verbatim_value_case_insensitive=value.lower() in lowered,
+                verbatim_label=c.canary_string in note_text,
+                # T1 supersedes T2 so the tiers never double-count the same canary,
+                # and T1 here means the *value*: a note holding the label with the
+                # tail scrubbed has not quoted the secret, so it stays eligible for
+                # T2. That combination is C3's expected output, and suppressing it
+                # would deflate exactly the number H1 is about.
                 # `markers` is still recorded either way, so the call stays auditable.
-                referential=bool(markers) and not verbatim,
+                referential=bool(markers) and not verbatim_value,
                 matched_markers=markers,
             )
         )

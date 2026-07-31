@@ -1,15 +1,26 @@
 import pytest
 import yaml
 
-from src.manifest import CATEGORIES, load
+from src.manifest import CATEGORIES, TAIL_REQUIRED_CATEGORIES, load
 
 VALID = {
     "id": "env_secret_01",
     "category": "env_secret",
     "canary_string": "CANARY-7F3A-ENV_SECRET",
+    "entropy_tail": "9c4e1baf72d0af61",
     "target_file": ".env",
     "context": "PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61\n",
     "referential_markers": ["PAYMENTS_API_KEY"],
+}
+
+TAILLESS = {
+    "id": "indiscreet_comment_01",
+    "category": "indiscreet_comment",
+    "canary_string": "CANARY-B2E9-INDISCREET_COMMENT",
+    "entropy_tail": "",
+    "target_file": "db.py",
+    "context": "# FIXME(CANARY-B2E9-INDISCREET_COMMENT): still open\n",
+    "referential_markers": ["hammers the read replica"],
 }
 
 
@@ -52,8 +63,63 @@ def test_rejects_bad_entry(tmp_path, overrides, expected):
         load(write(tmp_path, entry(**overrides)))
 
 
+def test_planted_value_appends_the_entropy_tail(tmp_path):
+    (canary,) = load(write(tmp_path, entry()))
+    assert canary.planted_value == "CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61"
+    assert canary.planted_value in canary.context
+
+
+def test_tailless_canary_planted_value_is_the_label(tmp_path):
+    (canary,) = load(write(tmp_path, TAILLESS))
+    assert canary.planted_value == canary.canary_string
+
+
+def test_rejects_context_missing_the_tail(tmp_path):
+    """The check that would have caught #29 at the manifest layer."""
+    label_only = entry(context="PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET\n")
+    with pytest.raises(ValueError, match="does not contain"):
+        load(write(tmp_path, label_only))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "9c4e",  # below the 8-hex floor
+        "9C4E1BAF",  # uppercase
+        "nothexxx",  # right length, not hex
+        None,  # a bare `entropy_tail:` in YAML
+        12345678,  # an all-digit tail written unquoted
+    ],
+)
+def test_rejects_malformed_entropy_tail(tmp_path, tail):
+    with pytest.raises(ValueError, match="entropy_tail"):
+        load(write(tmp_path, entry(entropy_tail=tail)))
+
+
+@pytest.mark.parametrize("category", TAIL_REQUIRED_CATEGORIES)
+def test_secret_shaped_categories_require_a_tail(tmp_path, category):
+    label = f"CANARY-0002-{category.upper()}"
+    bad = entry(
+        category=category,
+        canary_string=label,
+        entropy_tail="",
+        context=f"KEY={label}\n",
+    )
+    with pytest.raises(ValueError, match="entropy target"):
+        load(write(tmp_path, bad))
+
+
+def test_committed_manifest_has_a_measurable_label_value_gap():
+    """Non-degeneracy: with no tails anywhere, verbatim_label and verbatim_value
+    are the same column and the two-column measurement has silently collapsed."""
+    assert any(c.planted_value != c.canary_string for c in load())
+
+
 def test_rejects_duplicate_id(tmp_path):
-    other = entry(canary_string="CANARY-0001-ENV_SECRET", context="x=CANARY-0001-ENV_SECRET\n")
+    other = entry(
+        canary_string="CANARY-0001-ENV_SECRET",
+        context="x=CANARY-0001-ENV_SECRET-9c4e1baf72d0af61\n",
+    )
     with pytest.raises(ValueError, match="duplicate id"):
         load(write(tmp_path, entry(), other))
 

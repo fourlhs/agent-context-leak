@@ -21,11 +21,19 @@ CATEGORIES = (
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "canaries" / "manifest.yaml"
 
+# Categories whose value is secret-shaped, so C3's entropy detector needs a real
+# target. A floor, not a ceiling — #3 may give other categories tails too.
+TAIL_REQUIRED_CATEGORIES = ("env_secret", "hardcoded_credential")
+
 _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
+# 8 hex digits is ~32 bits — a *manifest shape* rule, below which any sane
+# detector would miss the tail. Not a scrubber threshold; #6 picks its own.
+_TAIL = re.compile(r"[0-9a-f]{8,}")
 _FIELDS = (
     "id",
     "category",
     "canary_string",
+    "entropy_tail",
     "target_file",
     "context",
     "referential_markers",
@@ -37,9 +45,21 @@ class Canary:
     id: str
     category: str
     canary_string: str
+    entropy_tail: str
     target_file: str
     context: str
     referential_markers: tuple[str, ...]
+
+    @property
+    def planted_value(self) -> str:
+        """What the fixture actually holds, and the T1 needle.
+
+        A property rather than a stored field so it cannot drift out of sync
+        with its two parts, and so `dataclasses.replace` keeps working.
+        """
+        if not self.entropy_tail:
+            return self.canary_string
+        return f"{self.canary_string}-{self.entropy_tail}"
 
 
 def load(path: Path = DEFAULT_PATH) -> tuple[Canary, ...]:
@@ -79,11 +99,28 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         if match.group(1) != c.category.upper():
             raise ValueError(at + f"suffix {match.group(1)!r} != category {c.category!r}")
 
+        # Must precede any use of planted_value: a null tail from a bare
+        # `entropy_tail:` would otherwise raise TypeError instead of this.
+        if not isinstance(c.entropy_tail, str) or not (
+            c.entropy_tail == "" or _TAIL.fullmatch(c.entropy_tail)
+        ):
+            raise ValueError(
+                at + f"entropy_tail {c.entropy_tail!r} must be a quoted string, "
+                'either "" or 8+ lowercase hex digits'
+            )
+        if c.category in TAIL_REQUIRED_CATEGORIES and not c.entropy_tail:
+            raise ValueError(
+                at + f"category {c.category!r} is secret-shaped, so C3 needs a real "
+                "entropy target: entropy_tail may not be empty"
+            )
+
         if not c.referential_markers:
             raise ValueError(at + "no referential_markers")
-        # Without this the fixture would plant a canary the scorer can never find.
-        if c.canary_string not in c.context:
-            raise ValueError(at + "context does not contain the canary_string")
+        # Without this the fixture would plant a canary the scorer can never
+        # find. Checked against the planted value, not the label, so a tail
+        # declared here but typo'd into `context` fails loudly.
+        if c.planted_value not in c.context:
+            raise ValueError(at + "context does not contain the planted value")
 
         target = PurePosixPath(c.target_file)
         if target.is_absolute() or ".." in target.parts:
