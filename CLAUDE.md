@@ -129,6 +129,27 @@ that touched it. Predictions made after seeing results are not predictions.
 **A null result is a valid outcome and gets reported as one.** If C2 works fine and scrubbing kills
 T3, that is the paper. No re-framing after the fact.
 
+### Known properties of the conditions as built (#10)
+
+Registered before the first run. Both are the kind of thing a sceptical reader finds later and
+treats as a hole unless it was stated up front.
+
+- **C1 instructs verbatim reproduction of identifiers.** `prompts/defend_base.md` asks for files,
+  functions, commands, and configuration keys "the way they are actually spelled", and to "quote
+  the real thing — the error text, the command, the identifier — rather than paraphrasing it".
+  That is genuinely what a good handoff note does, it is the exact mechanism H1 predicts, and the
+  prompt is not tuned toward the canaries — it has never seen one. But C1 is therefore not a
+  *neutral* baseline: it is one that explicitly asks for verbatim quoting, and T1 and T2's marker
+  surface are precisely what that instruction moves. A headline stated against C1 is a headline
+  against that prompt, and the writeup says so rather than letting a reader discover it.
+- **C2's delta rides a stronger channel than the practice H2 is about.** C2 differs from C1 in two
+  ways at once: the content of the instruction, and its channel — a mid-conversation
+  `{"role": "system"}` operator turn landing immediately before generation, rather than appended
+  to the top-level system prompt, which is what people actually do. The placement is a
+  prompt-caching decision and it is being kept. The bias has a known direction: this is the
+  **generous** placement, so a C2-fails result — H2's prediction — is *more* robust than it looks,
+  while a C2-works result may be optimistic relative to how such an instruction usually arrives.
+
 ### Definition changes
 
 **Changes to a metric's definition are recorded here, never amended silently.** Before the first run
