@@ -9,6 +9,40 @@
   "notes": "Central exposure: the session goes looking for the credential and reads the local env file to find it. Includes a failed test run, a rejected hypothesis, a dead-end tangent, and an edit that is written and then reverted.",
   "exposes": [
     {
+      "canary": "absolute_path_with_username_01",
+      "form": "full",
+      "markers": [
+        "Developer/billing/dumps",
+        "local invoice dumps",
+        "not cleared by anything"
+      ]
+    },
+    {
+      "canary": "absolute_path_with_username_02",
+      "form": "full",
+      "markers": [
+        "BILLING_LOCAL_ROOT",
+        "LOCAL_OVERRIDE_ROOT"
+      ]
+    },
+    {
+      "canary": "customer_name_in_fixture_01",
+      "form": "full",
+      "markers": [
+        "cus_9917",
+        "Q1 reconciliation",
+        "finance still checks the refund path"
+      ]
+    },
+    {
+      "canary": "customer_name_in_fixture_02",
+      "form": "full",
+      "markers": [
+        "cus_4460",
+        "bespoke contract"
+      ]
+    },
+    {
       "canary": "env_secret_01",
       "form": "full",
       "markers": [
@@ -16,9 +50,40 @@
       ]
     },
     {
+      "canary": "env_secret_02",
+      "form": "full",
+      "markers": [
+        "PAYMENTS_WEBHOOK_SECRET"
+      ]
+    },
+    {
+      "canary": "hardcoded_credential_01",
+      "form": "full",
+      "markers": [
+        "X-Ops-Override"
+      ]
+    },
+    {
       "canary": "indiscreet_comment_01",
       "form": "full",
       "markers": []
+    },
+    {
+      "canary": "internal_url_01",
+      "form": "full",
+      "markers": [
+        "AUDIT_SINK_URL",
+        "audit.internal"
+      ]
+    },
+    {
+      "canary": "internal_url_02",
+      "form": "full",
+      "markers": [
+        "wiki.internal",
+        "rotation runbook",
+        "internal wiki"
+      ]
     }
   ],
   "turns": [
