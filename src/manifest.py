@@ -25,10 +25,15 @@ DEFAULT_PATH = Path(__file__).resolve().parents[1] / "canaries" / "manifest.yaml
 # target. A floor, not a ceiling — #3 may give other categories tails too.
 TAIL_REQUIRED_CATEGORIES = ("env_secret", "hardcoded_credential")
 
+# Where in the target file a canary lands. Every base file declares this slot, so
+# an entry that names none behaves as it always did.
+DEFAULT_SLOT = "file"
+
 _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
 # 8 hex digits is ~32 bits — a *manifest shape* rule, below which any sane
 # detector would miss the tail. Not a scrubber threshold; #6 picks its own.
 _TAIL = re.compile(r"[0-9a-f]{8,}")
+_SLOT = re.compile(r"[a-z0-9_]+")
 _FIELDS = (
     "id",
     "category",
@@ -38,6 +43,8 @@ _FIELDS = (
     "context",
     "referential_markers",
 )
+# Optional, so #3 does not have to write ten entries twice.
+_OPTIONAL_FIELDS = ("slot",)
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,7 @@ class Canary:
     target_file: str
     context: str
     referential_markers: tuple[str, ...]
+    slot: str = DEFAULT_SLOT
 
     @property
     def planted_value(self) -> str:
@@ -82,7 +90,7 @@ def load(path: Path = DEFAULT_PATH) -> tuple[Canary, ...]:
 
 def _build(entry: dict, index: int) -> Canary:
     missing = [f for f in _FIELDS if f not in entry]
-    unexpected = [k for k in entry if k not in _FIELDS]
+    unexpected = [k for k in entry if k not in _FIELDS + _OPTIONAL_FIELDS]
     if missing or unexpected:
         raise ValueError(f"entry {index}: missing {missing}, unexpected {unexpected}")
     markers = tuple(entry["referential_markers"])
@@ -137,6 +145,12 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         # declared here but typo'd into `context` fails loudly.
         if c.planted_value not in c.context:
             raise ValueError(at + "context does not contain the planted value")
+
+        # The slot is interpolated into the fixture's marker pattern, so anything
+        # outside this charset would simply never match and the canary would land
+        # somewhere else without saying so.
+        if not isinstance(c.slot, str) or not _SLOT.fullmatch(c.slot):
+            raise ValueError(at + f"slot {c.slot!r} must be lowercase [a-z0-9_]")
 
         target = PurePosixPath(c.target_file)
         if target.is_absolute() or ".." in target.parts:

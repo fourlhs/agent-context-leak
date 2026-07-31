@@ -3,7 +3,7 @@ import dataclasses
 import pytest
 import yaml
 
-from src.manifest import CATEGORIES, TAIL_REQUIRED_CATEGORIES, Canary, load
+from src.manifest import CATEGORIES, DEFAULT_SLOT, TAIL_REQUIRED_CATEGORIES, Canary, load
 
 VALID = {
     "id": "env_secret_01",
@@ -58,11 +58,21 @@ def test_valid_entry_round_trips(tmp_path):
         ({"context": "unrelated code\n"}, "does not contain"),
         ({"target_file": "/etc/passwd"}, "must be relative"),
         ({"target_file": "../outside.py"}, "must be relative"),
+        ({"slot": "Refund Headers"}, "must be lowercase"),
     ],
 )
 def test_rejects_bad_entry(tmp_path, overrides, expected):
     with pytest.raises(ValueError, match=expected):
         load(write(tmp_path, entry(**overrides)))
+
+
+def test_slot_is_optional(tmp_path):
+    """#3 authors ten entries against this schema, so a second required field
+    would mean writing them all twice."""
+    (defaulted,) = load(write(tmp_path, entry()))
+    assert defaulted.slot == DEFAULT_SLOT
+    (named,) = load(write(tmp_path, entry(slot="refund_headers")))
+    assert named.slot == "refund_headers"
 
 
 def test_planted_value_appends_the_entropy_tail(tmp_path):
