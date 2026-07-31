@@ -4,6 +4,12 @@ __pycache__/
 .pytest_cache/
 .env
 fixture/
+# Raw model outputs are evidence, not source: large, regenerable only by paying
+# for them again, and published as a release attachment rather than committed (#24).
 runs/*
 !runs/.gitkeep
+# `results/` is scratch — whatever the last run wrote. The numbers we stand
+# behind live in `results/final/`, which this pattern does not reach (`*` does
+# not cross a `/`) and which is tracked on purpose: a benchmark whose published
+# numbers cannot be read beside the code is not much of a benchmark (#24).
 results/*.csv
