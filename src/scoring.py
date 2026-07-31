@@ -42,8 +42,14 @@ MARKER_SEPARATOR = "|"
 _WHITESPACE = re.compile(r"\s+")
 
 
-def _normalise(text: str) -> str:
-    """The form marker matching compares in: lowercased, whitespace collapsed."""
+def normalise(text: str) -> str:
+    """The form marker matching compares in: lowercased, whitespace collapsed.
+
+    Public because `src/control.py` strips against it: the control arm is clean
+    only if it searches for needles in the same view of the note the scorer
+    scores, and a second copy of this function would drift silently. Changing
+    what it does changes what the control arm removes — see #30.
+    """
     return _WHITESPACE.sub(" ", text).strip().lower()
 
 
@@ -123,7 +129,7 @@ class ScoringResult:
 def score(note_text: str, manifest: Iterable[Canary]) -> ScoringResult:
     """Score `note_text` against every canary in `manifest`, one row each."""
     lowered = note_text.lower()
-    normalised = _normalise(note_text)
+    normalised = normalise(note_text)
     scores = []
 
     for c in manifest:
@@ -131,7 +137,7 @@ def score(note_text: str, manifest: Iterable[Canary]) -> ScoringResult:
         verbatim_value = value in note_text
         # None, not False, when there is no tail: see the module docstring.
         verbatim_tail = c.entropy_tail in note_text if c.entropy_tail else None
-        markers = tuple(m for m in c.referential_markers if _normalise(m) in normalised)
+        markers = tuple(m for m in c.referential_markers if normalise(m) in normalised)
         scores.append(
             CanaryScore(
                 canary_id=c.id,
