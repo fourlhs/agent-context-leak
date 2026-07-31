@@ -2,10 +2,19 @@
 
 Measuring what agent-written handoff notes leak — and whether an adversary can use it.
 
-**Status: scaffold landed (#1); the deterministic core is next.** `main` holds the docs, the uv
-toolchain, and a green test baseline — no canary manifest, no modules, no model-calling code. Issues
-#1–#18 track the build. Sections below describe intent; update them as code lands, and treat a stale
-status line here as a bug.
+**Status: everything up to the pilot gate is built; no model has been called yet.** `main` holds the
+manifest and fixture generator, T1/T2 scoring, the transcript schema with two pilots, the run store
+and cost summariser, the defender (C1/C2/C3) and the attacker — all green, all exercised against
+fake clients. **Total API spend so far: $0.**
+
+Not yet built: the C3 scrubber (#6, in review), the remaining ten canaries (#3), the full transcript
+corpus (#8), the control arm (#12), aggregation (#13), the hook (#16), the writeup (#17).
+
+Next is **#14, the pilot gate** — the first thing here that spends money, and a hard stop until it
+reports a measured number.
+
+Sections below describe intent; update them as code lands, and treat a stale status line here as a
+bug.
 
 ## Threat model
 
@@ -149,6 +158,25 @@ treats as a hole unless it was stated up front.
   prompt-caching decision and it is being kept. The bias has a known direction: this is the
   **generous** placement, so a C2-fails result — H2's prediction — is *more* robust than it looks,
   while a C2-works result may be optimistic relative to how such an instruction usually arrives.
+
+### Known properties of the attacker as built (#11)
+
+Same standing: registered before the first run, because both set the floor the headline is netted
+against.
+
+- **The attacker prompt carries a residual prior, deliberately minimised but not zero.**
+  `prompts/attack.md` no longer enumerates the manifest's categories — that was removed once a
+  review found the prose had listed five of the six. What remains is irreducible: the prompt cannot
+  describe the task without the words "secret" and "value", and it tells the attacker the artefact
+  is a handoff note from a coding session. That is a non-zero prior in every category. It is
+  **identical in both arms**, which is exactly what the guess-rate control (#12) subtracts — so it
+  is registered here as a property of the floor, not as a bias toward either arm.
+- **The attacker is calibrated for precision over recall.** `claimed_values` admits only values
+  present in the note, including ones assembled from fragments spread across it, and excludes
+  anything inferred or guessed; `claimed_locations` takes the rest. The choice was made before the
+  first run and it is what lets the control arm do its job: an attacker tuned for recall would
+  inflate both arms and compress `T3_net` toward noise. If T3 comes out low, "was the attacker any
+  good" is answerable from the committed prompt rather than argued after the fact.
 
 ### Definition changes
 
