@@ -15,6 +15,7 @@ import pytest
 
 from src import defender
 from src.defender import CONDITIONS, EFFORT, MODEL, distill, prompt_hash, request, run
+from src.runs import RunStore, Usage
 
 TRANSCRIPT = "[user]\nSpeed up the nightly job.\n\n[assistant]\nRaised the pool to 16.\n"
 NOTE = "### What changed\nRaised the worker pool from 4 to 16 in `worker.py`.\n"
@@ -58,41 +59,11 @@ def fake_scrub(note: str) -> FakeScrubResult:
     return FakeScrubResult(note.replace("16", "[REDACTED]"), ("16",))
 
 
-@dataclass(frozen=True)
-class FakeRecord:
-    """#9's `RunRecord` shape, field for field — every field required as it is there.
-
-    `raw_output` carries its `= ""` default from #9. Nothing else defaults: a
-    field missing from `run()`'s call would raise here exactly as it would in
-    `src.runs`, which is the point of mirroring the signature rather than
-    accepting `**kwargs`.
-    """
-
-    stage: str
-    condition: str
-    transcript: str
-    sample: int
-    output: str
-    model: str
-    effort: str
-    prompt_hash: str
-    usage: object
-    git_sha: str
-    created_at: str
-    raw_output: str = ""
-
-
-class FakeStore:
-    def __init__(self, have=()):
-        self.have = set(have)
-        self.written: list[FakeRecord] = []
-
-    def exists(self, stage, condition, transcript, sample) -> bool:
-        return (stage, condition, transcript, sample) in self.have
-
-    def write(self, record) -> Path:
-        self.written.append(record)
-        return Path(f"runs/{record.transcript}-{record.condition}-{record.sample}.json")
+@pytest.fixture
+def store(tmp_path) -> RunStore:
+    """The real store, on a temp root. No fake: a hand-mirrored record agrees
+    today and drifts later, and the drift is invisible until the pilot gate."""
+    return RunStore(tmp_path)
 
 
 def prefix(req: dict) -> str:
@@ -195,7 +166,9 @@ def test_effort_is_the_cost_lever():
 
 
 def test_usage_is_captured_including_both_cache_fields():
-    assert distill(TRANSCRIPT, "C1", FakeClient()).usage == defender.Usage(1200, 340, 8000, 0)
+    # `src.runs.Usage`, not a local twin: a dataclass `__eq__` across two
+    # different classes falls back to identity and is silently never equal.
+    assert distill(TRANSCRIPT, "C1", FakeClient()).usage == Usage(1200, 340, 8000, 0)
 
 
 def test_absent_cache_counters_read_as_zero():
@@ -230,12 +203,12 @@ def test_a_truncated_note_is_never_returned_as_a_complete_one(condition):
         distill(TRANSCRIPT, condition, client, scrub=fake_scrub)
 
 
-def test_a_truncated_note_never_reaches_the_store():
-    store, client = FakeStore(), FakeClient()
+def test_a_truncated_note_never_reaches_the_store(store):
+    client = FakeClient()
     client._reply.stop_reason = "max_tokens"
     with pytest.raises(RuntimeError, match="truncated"):
-        run(TRANSCRIPT, "t1", client, store, FakeRecord, samples=1, **PROVENANCE)
-    assert store.written == []
+        run(TRANSCRIPT, "t1", client, store, samples=1, **PROVENANCE)
+    assert store.read_all() == ()
 
 
 def test_stop_reason_leaves_distill_so_it_can_be_acted_on():
@@ -269,17 +242,16 @@ def test_prompt_hash_tracks_the_c2_delta(monkeypatch):
 PROVENANCE = {"git_sha": "0" * 40, "created_at": "2026-07-31T00:00:00Z"}
 
 
-def test_run_writes_one_record_per_condition_and_sample():
-    store, client = FakeStore(), FakeClient()
-    written = run(
-        TRANSCRIPT, "t1", client, store, FakeRecord, samples=2, scrub=fake_scrub, **PROVENANCE
-    )
+def test_run_writes_one_record_per_condition_and_sample(store):
+    client = FakeClient()
+    written = run(TRANSCRIPT, "t1", client, store, samples=2, scrub=fake_scrub, **PROVENANCE)
+    records = store.read_all()
 
-    assert len(written) == len(store.written) == 6
-    assert {(r.condition, r.sample) for r in store.written} == {
+    assert len(written) == len(records) == 6
+    assert {(r.condition, r.sample) for r in records} == {
         (c, s) for c in CONDITIONS for s in (0, 1)
     }
-    first = store.written[0]
+    first = store.read(defender.STAGE, "C1", "t1", 0)
     assert (first.stage, first.transcript, first.model, first.effort) == (
         "defender",
         "t1",
@@ -287,68 +259,82 @@ def test_run_writes_one_record_per_condition_and_sample():
         EFFORT,
     )
     assert first.prompt_hash == prompt_hash("C1")
-    assert first.usage == defender.Usage(1200, 340, 8000, 0)
+    assert first.usage == Usage(1200, 340, 8000, 0)
     assert (first.git_sha, first.created_at) == (PROVENANCE["git_sha"], PROVENANCE["created_at"])
 
 
 def test_the_stage_matches_the_harnesss_vocabulary():
-    """#9 documents "defender" and `summarise()` groups on it; "defend" KeyErrors."""
+    """`runs_report.summarise()` groups on it; "defend" would KeyError at #14."""
     assert defender.STAGE == "defender"
 
 
-def test_c3s_raw_generation_reaches_the_record():
-    """Without this the scrubber's input is gone and retuning it costs 90 calls."""
-    store, client = FakeStore(), FakeClient()
-    run(
-        TRANSCRIPT, "t1", client, store, FakeRecord, samples=1, scrub=fake_scrub, **PROVENANCE
-    )
-    by_condition = {r.condition: r for r in store.written}
+def test_c3s_raw_generation_survives_the_round_trip(store):
+    """Read back off disk, not off the object we just built.
 
-    assert by_condition["C3"].raw_output == NOTE.strip()
-    assert by_condition["C3"].output == fake_scrub(NOTE.strip()).text
-    assert by_condition["C3"].output != by_condition["C3"].raw_output
+    Without `raw_output` the scrubber's input is gone and retuning its entropy
+    threshold costs 90 defender calls.
+    """
+    run(TRANSCRIPT, "t1", FakeClient(), store, samples=1, scrub=fake_scrub, **PROVENANCE)
+    c3 = store.read(defender.STAGE, "C3", "t1", 0)
+
+    assert c3.raw_output == NOTE.strip()
+    assert c3.output == fake_scrub(NOTE.strip()).text
+    assert c3.output != c3.raw_output
     # `output` is what the attacker sees, so an unscrubbed C3 note must not be it.
-    assert "16" not in by_condition["C3"].output
+    assert "16" not in c3.output
 
 
 @pytest.mark.parametrize("condition", ("C1", "C2"))
-def test_conditions_without_a_scrubber_leave_raw_output_empty(condition):
+def test_conditions_without_a_scrubber_leave_raw_output_empty(store, condition):
     """`output` already is the raw generation; storing it twice buys nothing."""
-    store, client = FakeStore(), FakeClient()
     run(
         TRANSCRIPT,
         "t1",
-        client,
+        FakeClient(),
         store,
-        FakeRecord,
         conditions=(condition,),
         samples=1,
         **PROVENANCE,
     )
-    assert store.written[0].raw_output == ""
-    assert store.written[0].output == NOTE.strip()
+    record = store.read(defender.STAGE, condition, "t1", 0)
+    assert record.raw_output == ""
+    assert record.output == NOTE.strip()
 
 
-def test_run_skips_what_the_store_already_has():
+def test_run_skips_what_the_store_already_has(store):
     """Resume must not re-call the API — that is what the store is doing here."""
-    store, client = FakeStore({("defender", "C1", "t1", 0)}), FakeClient()
-    run(TRANSCRIPT, "t1", client, store, FakeRecord, conditions=("C1",), samples=2, **PROVENANCE)
+    client = FakeClient()
+    run(TRANSCRIPT, "t1", client, store, conditions=("C1",), samples=1, **PROVENANCE)
+    run(TRANSCRIPT, "t1", client, store, conditions=("C1",), samples=2, **PROVENANCE)
 
-    assert len(client.calls) == 1
-    assert [r.sample for r in store.written] == [1]
+    # Two calls, not three: sample 0 was already on disk the second time around.
+    assert len(client.calls) == 2
+    assert sorted(r.sample for r in store.read_all()) == [0, 1]
 
 
 # ------------------------------------------------------------------------------- isolation
 
 
 def test_the_defender_imports_neither_transcripts_nor_the_scrubber_at_module_scope():
-    """Both land on their own branches; a module-scope import would couple the merges."""
+    """Three different reasons, one assertion.
+
+    `transcript` — `distill` takes rendered text, so the defender needs no
+    fixture and no manifest to be exercised. `scrubber` — #34 is still on its own
+    branch. `anthropic` — the deterministic tests must never need the SDK
+    installed to import this module.
+    """
     tree = ast.parse(Path(defender.__file__).read_text(encoding="utf-8"))
     imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     dumped = " ".join(ast.dump(n) for n in imports)
     assert "transcript" not in dumped
     assert "scrubber" not in dumped
     assert "anthropic" not in dumped
+
+
+def test_the_defender_uses_the_stores_own_usage_class():
+    """A local twin would compare unequal to a record read back from `runs/`,
+    silently, at exactly the budget reconciliation the pilot gate performs."""
+    assert defender.Usage is Usage
 
 
 def test_the_baseline_prompt_never_names_what_it_is_being_tested_on():

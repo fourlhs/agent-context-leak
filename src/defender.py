@@ -35,11 +35,10 @@ counts it all the same. That biases the headline downward and leaves no trace, s
 `distill` raises rather than returning it. Read the measured thinking volume out
 of `runs/` at the pilot gate (#14) before moving the ceiling; do not move it blind.
 
-**Injected, not imported.** The client, the run store, the run-record type, and
-the scrubber all arrive as arguments, and `src.transcript` is imported inside
-`main` only. `distill` takes already-rendered text, so the defender can be
-exercised with no fixture and no manifest, and so #6, #7, #9 and this module can
-land in any order.
+**Injected, not imported.** The client, the run store, and the scrubber arrive as
+arguments, and `src.transcript` is imported inside `main` only. `distill` takes
+already-rendered text, so the defender can be exercised with no fixture, no
+manifest, and no `runs/` directory.
 
 `temperature` / `top_p` / `top_k` are never sent — they return 400 on Opus 5.
 Determinism lives in the scorer; we report rates over repeated samples.
@@ -50,7 +49,8 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+
+from src.runs import RunRecord, RunStore, Usage
 
 PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -71,26 +71,6 @@ C2_INSTRUCTION = (PROMPTS / "defend_instructed.md").read_text(encoding="utf-8").
 
 
 @dataclass(frozen=True)
-class Usage:
-    """The four counters every run record carries.
-
-    #9 owns the canonical definition in `src/runs.py`; this is the same four
-    fields, kept here only so the defender runs while #9 is unmerged.
-
-    **Delete this class at that merge and `from src.runs import Usage`.** A
-    dataclass `__eq__` returns NotImplemented across two different classes, so
-    Python falls back to identity and a freshly computed usage never compares
-    equal to one read back out of `runs/` — silently, and a budget reconciliation
-    at the pilot gate is exactly the place that comparison gets made.
-    """
-
-    input_tokens: int
-    output_tokens: int
-    cache_read_input_tokens: int
-    cache_creation_input_tokens: int
-
-
-@dataclass(frozen=True)
 class Distillation:
     """One defender call. `note` is what gets written; for C3 it is scrubbed.
 
@@ -108,14 +88,6 @@ class Distillation:
     redactions: int
     stop_reason: str
     raw: str = ""
-
-
-class RunStore(Protocol):
-    """As much of #9's `src.runs.RunStore` as the defender touches."""
-
-    def exists(self, stage: str, condition: str, transcript: str, sample: int) -> bool: ...
-
-    def write(self, record) -> Path: ...
 
 
 def _check(condition: str) -> str:
@@ -217,7 +189,6 @@ def run(
     transcript: str,
     client,
     store: RunStore,
-    record: Callable[..., object],
     *,
     git_sha: str,
     created_at: str,
@@ -226,14 +197,13 @@ def run(
     model: str = MODEL,
     effort: str = EFFORT,
     scrub: Callable[[str], object] = _scrub,
-) -> list:
+) -> list[Path]:
     """Every (condition, sample) for one transcript, skipping what `store` already has.
 
     The skip is why the store reaches the defender at all: a re-run must not
-    re-call the API. `record` is #9's `RunRecord`, passed in rather than imported
-    so this module stays runnable while #9 is on its own branch.
+    re-call the API.
 
-    `git_sha` and `created_at` are required arguments because #9's `write()`
+    `git_sha` and `created_at` are required arguments because `RunStore.write()`
     deliberately reads neither the clock nor git — a value stamped at write time
     cannot be reproduced later. Taking them here keeps this loop deterministic
     and pushes the two non-reproducible reads out to #14, which owns the run.
@@ -246,23 +216,23 @@ def run(
             out = distill(rendered, condition, client, model=model, effort=effort, scrub=scrub)
             written.append(
                 store.write(
-                    record(
+                    RunRecord(
                         stage=STAGE,
                         condition=condition,
                         transcript=transcript,
                         sample=sample,
                         output=out.note,
-                        # C3's pre-scrub generation; "" elsewhere, where `output`
-                        # already is it. Keeps `output` meaning "what the attacker
-                        # sees" so #11 cannot leak an unscrubbed C3 note, and keeps
-                        # the redaction count re-derivable without a second call.
-                        raw_output=out.raw,
                         model=model,
                         effort=effort,
                         prompt_hash=prompt_hash(condition),
                         usage=out.usage,
                         git_sha=git_sha,
                         created_at=created_at,
+                        # C3's pre-scrub generation; "" elsewhere, where `output`
+                        # already is it. Keeps `output` meaning "what the attacker
+                        # sees" so #11 cannot leak an unscrubbed C3 note, and keeps
+                        # the redaction count re-derivable without a second call.
+                        raw_output=out.raw,
                     )
                 )
             )
