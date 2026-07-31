@@ -6,9 +6,12 @@ from src.runs import RunRecord, RunStore, Usage
 from src.runs_report import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
+    INTRO_EXPIRY,
+    INTRO_PRICES,
     PRICES,
     cost,
     main,
+    provenance_warnings,
     summarise,
 )
 
@@ -126,7 +129,7 @@ def test_unpriced_model_raises_rather_than_costing_nothing():
 
 
 def test_main_prints_the_stage_rows_and_the_total(store, capsys):
-    main(store.root)
+    assert main(store.root) == 0
 
     out = capsys.readouterr().out
     assert f"{TOTAL_COST:.4f}" in out
@@ -134,18 +137,86 @@ def test_main_prints_the_stage_rows_and_the_total(store, capsys):
     assert f"{ATTACKER_COST:.4f}" in out
     assert "TOTAL" in out
     assert "cache_read" in out
-    assert "warning" not in out  # this fixture does read the cache
+    assert "warning" not in out  # this fixture reads the cache, one setting each
 
 
 def test_main_warns_when_no_call_ever_reads_the_cache(tmp_path, capsys):
     RunStore(tmp_path).write(ATTACKER)
 
-    main(tmp_path)
+    assert main(tmp_path) == 0
 
-    assert "cache_read_input_tokens is 0" in capsys.readouterr().out
+    assert "no call in 1 read the cache" in capsys.readouterr().out
 
 
 def test_main_on_an_empty_runs_dir_says_so(tmp_path, capsys):
-    main(tmp_path)
+    assert main(tmp_path) == 0
 
     assert "no run records" in capsys.readouterr().out
+
+
+def test_provenance_warning_fires_per_field_and_per_stage():
+    # The escalation-lever case: half the attacker stage was rerun at `low`
+    # while `exists()` kept every `medium` record from the pilot.
+    records = (DEFENDER, ATTACKER, replace(ATTACKER, sample=1, effort="low"))
+
+    assert provenance_warnings(records) == ["attacker mixes effort: low, medium"]
+
+
+def test_provenance_warning_covers_model_and_prompt_hash():
+    mixed = (
+        DEFENDER,
+        replace(DEFENDER, sample=1, model="claude-sonnet-5", prompt_hash="deadbeef"),
+    )
+
+    assert provenance_warnings(mixed) == [
+        "defender mixes model: claude-opus-5, claude-sonnet-5",
+        "defender mixes prompt_hash: a1b2c3d4, deadbeef",
+    ]
+
+
+def test_one_setting_per_stage_warns_about_nothing(store):
+    assert provenance_warnings(store.read_all()) == []
+
+
+def test_main_prints_the_provenance_warning(tmp_path, capsys):
+    s = RunStore(tmp_path)
+    s.write(DEFENDER)
+    s.write(replace(DEFENDER, sample=1, effort="low"))
+
+    assert main(tmp_path) == 0
+
+    assert "warning: defender mixes effort: low, medium" in capsys.readouterr().out
+
+
+def test_intro_pricing_is_reported_alongside_the_list_price(store, capsys):
+    # Escalation lever 4 is switching the attacker to claude-sonnet-5 for this
+    # rate: 0.5 * 2.00 + 0.2 * 10.00 = $3.00, so the total drops to $25.00.
+    assert INTRO_PRICES["claude-sonnet-5"] == (2.00, 10.00)
+
+    main(store.root)
+
+    out = capsys.readouterr().out
+    assert f"{TOTAL_COST:.4f}" in out  # list price still the headline
+    assert f"{DEFENDER_COST + 3.00:.4f}" in out
+    assert INTRO_EXPIRY in out
+
+
+def test_an_all_opus_run_prints_no_intro_line(tmp_path, capsys):
+    RunStore(tmp_path).write(DEFENDER)
+
+    main(tmp_path)
+
+    assert "introductory" not in capsys.readouterr().out
+
+
+def test_one_unreadable_record_still_yields_a_labelled_floor(store, capsys):
+    bad = store.write(replace(DEFENDER, sample=1))
+    bad.write_text("{ truncated", encoding="utf-8")
+
+    # Not a traceback: the operator gets a number, told it is a floor.
+    assert main(store.root) == 1
+
+    out = capsys.readouterr().out
+    assert f"{TOTAL_COST:.4f}" in out
+    assert "INCOMPLETE" in out
+    assert str(bad) in out
