@@ -122,6 +122,7 @@ prompts/
   defend_instructed.md     C2
   attack.md                attacker system prompt + escalation ladder
 transcripts/               session transcripts (JSON)
+transcripts/README.md      transcript schema
 runs/                      raw outputs + token usage per (condition, transcript, sample)
 results/                   scored CSV
 tests/
