@@ -19,13 +19,33 @@
 #                        hit by accident.
 #   target_file          path inside fixture/, relative
 #   slot                 OPTIONAL. Which marker in the target file the context
-#                        replaces; defaults to "file", the one every base file
-#                        declares. The named slots are in scripts/build_fixture.py
-#                        — `refund_headers` puts a credential inside the call
-#                        that uses it, `invoice_rows` a customer inside the test
-#                        data, and so on. Naming a slot the file does not declare
-#                        is an error, not a silent append. Omit it and the entry
-#                        behaves exactly as it did before slots existed.
+#                        replaces; defaults to "file", which every base file
+#                        below declares. Omit it and the entry behaves exactly as
+#                        it did before slots existed. target_file and slot must
+#                        agree — naming a slot the file does not declare fails
+#                        the build rather than appending silently. Every slot
+#                        there is:
+#
+#                          target_file             slot            lands
+#                          .env                    file            at the end
+#                          .env                    urls            among the URL vars
+#                          requirements.txt        file            at the end
+#                          config.py               file            module scope, after load_dotenv()
+#                          config.py               settings        module scope, above settings()
+#                          db.py                   file            module scope, above query()
+#                          db.py                   constants       beside BACKOFF_SECONDS
+#                          app.py                  file            module scope, after app = Flask()
+#                          app.py                  refund_headers  inside headers={} of the refund call
+#                          app.py                  list_invoices   inside the list_invoices handler
+#                          tests/test_invoices.py  file            module scope, after the imports
+#                          tests/test_invoices.py  invoice_rows    inside the invoices fixture list
+#                          README.md               file            at the end, under Notes
+#                          README.md               setup           under "Running it locally"
+#
+#                        Two canaries may not share one (target_file, slot):
+#                        they would land consecutively and read as a planted
+#                        list. A canary aimed at a file not listed above creates
+#                        it, and must leave `slot` unset.
 #   context              text planted in that file; must contain the planted
 #                        value. Indentation comes from the slot, so write it
 #                        flush left even for a slot inside a function.

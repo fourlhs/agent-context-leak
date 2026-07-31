@@ -58,7 +58,9 @@ def test_valid_entry_round_trips(tmp_path):
         ({"context": "unrelated code\n"}, "does not contain"),
         ({"target_file": "/etc/passwd"}, "must be relative"),
         ({"target_file": "../outside.py"}, "must be relative"),
-        ({"slot": "Refund Headers"}, "must be lowercase"),
+        # A hyphen, not a space: "refund-headers" is the realistic typo, and it
+        # is the case that tells `fullmatch` from `match`.
+        ({"slot": "refund-headers"}, "must match"),
     ],
 )
 def test_rejects_bad_entry(tmp_path, overrides, expected):
@@ -73,6 +75,21 @@ def test_slot_is_optional(tmp_path):
     assert defaulted.slot == DEFAULT_SLOT
     (named,) = load(write(tmp_path, entry(slot="refund_headers")))
     assert named.slot == "refund_headers"
+
+
+def test_rejects_two_canaries_at_one_slot(tmp_path):
+    """`slot` defaults, so stacking is what you get by not thinking about it —
+    and stacked canaries land consecutively as the list of secrets #32 removed."""
+    second = entry(
+        id="env_secret_02",
+        canary_string="CANARY-0001-ENV_SECRET",
+        entropy_tail="00112233445566aa",
+        context="WEBHOOK_SECRET=CANARY-0001-ENV_SECRET-00112233445566aa\n",
+    )
+    with pytest.raises(ValueError, match="already fills slot"):
+        load(write(tmp_path, entry(), second))
+    # Same file, different slot, is the whole point of the field.
+    assert len(load(write(tmp_path, entry(), {**second, "slot": "urls"}))) == 2
 
 
 def test_planted_value_appends_the_entropy_tail(tmp_path):
