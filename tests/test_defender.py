@@ -60,7 +60,13 @@ def fake_scrub(note: str) -> FakeScrubResult:
 
 @dataclass(frozen=True)
 class FakeRecord:
-    """#9's `RunRecord` shape. Provenance defaulted — the harness stamps it."""
+    """#9's `RunRecord` shape, field for field — every field required as it is there.
+
+    `raw_output` carries its `= ""` default from #9. Nothing else defaults: a
+    field missing from `run()`'s call would raise here exactly as it would in
+    `src.runs`, which is the point of mirroring the signature rather than
+    accepting `**kwargs`.
+    """
 
     stage: str
     condition: str
@@ -71,8 +77,9 @@ class FakeRecord:
     effort: str
     prompt_hash: str
     usage: object
-    git_sha: str = "0" * 40
-    created_at: str = "2026-07-31T00:00:00Z"
+    git_sha: str
+    created_at: str
+    raw_output: str = ""
 
 
 class FakeStore:
@@ -206,6 +213,36 @@ def test_a_reply_with_no_text_is_an_error_not_an_empty_note():
         distill(TRANSCRIPT, "C1", client)
 
 
+# ------------------------------------------------------------------------------ truncation
+
+
+@pytest.mark.parametrize("condition", CONDITIONS)
+def test_a_truncated_note_is_never_returned_as_a_complete_one(condition):
+    """The dangerous case: a partial note looks complete and scores low on every tier.
+
+    Thinking bills against `max_tokens`, so this is live. Silently returning it
+    would put a near-zero numerator against a denominator that counts the sample
+    anyway — the headline biased downward with nothing in `runs/` to show it.
+    """
+    client = FakeClient("### What changed\nRaised the worker pool from 4 to 1")
+    client._reply.stop_reason = "max_tokens"
+    with pytest.raises(RuntimeError, match="truncated"):
+        distill(TRANSCRIPT, condition, client, scrub=fake_scrub)
+
+
+def test_a_truncated_note_never_reaches_the_store():
+    store, client = FakeStore(), FakeClient()
+    client._reply.stop_reason = "max_tokens"
+    with pytest.raises(RuntimeError, match="truncated"):
+        run(TRANSCRIPT, "t1", client, store, FakeRecord, samples=1, **PROVENANCE)
+    assert store.written == []
+
+
+def test_stop_reason_leaves_distill_so_it_can_be_acted_on():
+    assert distill(TRANSCRIPT, "C1", FakeClient()).stop_reason == "end_turn"
+    assert distill(TRANSCRIPT, "C3", FakeClient(), scrub=fake_scrub).stop_reason == "end_turn"
+
+
 # ---------------------------------------------------------------------------- prompt hash
 
 
@@ -229,9 +266,14 @@ def test_prompt_hash_tracks_the_c2_delta(monkeypatch):
 # ------------------------------------------------------------------------------ run + store
 
 
+PROVENANCE = {"git_sha": "0" * 40, "created_at": "2026-07-31T00:00:00Z"}
+
+
 def test_run_writes_one_record_per_condition_and_sample():
     store, client = FakeStore(), FakeClient()
-    written = run(TRANSCRIPT, "t1", client, store, FakeRecord, samples=2, scrub=fake_scrub)
+    written = run(
+        TRANSCRIPT, "t1", client, store, FakeRecord, samples=2, scrub=fake_scrub, **PROVENANCE
+    )
 
     assert len(written) == len(store.written) == 6
     assert {(r.condition, r.sample) for r in store.written} == {
@@ -239,19 +281,58 @@ def test_run_writes_one_record_per_condition_and_sample():
     }
     first = store.written[0]
     assert (first.stage, first.transcript, first.model, first.effort) == (
-        "defend",
+        "defender",
         "t1",
         MODEL,
         EFFORT,
     )
     assert first.prompt_hash == prompt_hash("C1")
     assert first.usage == defender.Usage(1200, 340, 8000, 0)
+    assert (first.git_sha, first.created_at) == (PROVENANCE["git_sha"], PROVENANCE["created_at"])
+
+
+def test_the_stage_matches_the_harnesss_vocabulary():
+    """#9 documents "defender" and `summarise()` groups on it; "defend" KeyErrors."""
+    assert defender.STAGE == "defender"
+
+
+def test_c3s_raw_generation_reaches_the_record():
+    """Without this the scrubber's input is gone and retuning it costs 90 calls."""
+    store, client = FakeStore(), FakeClient()
+    run(
+        TRANSCRIPT, "t1", client, store, FakeRecord, samples=1, scrub=fake_scrub, **PROVENANCE
+    )
+    by_condition = {r.condition: r for r in store.written}
+
+    assert by_condition["C3"].raw_output == NOTE.strip()
+    assert by_condition["C3"].output == fake_scrub(NOTE.strip()).text
+    assert by_condition["C3"].output != by_condition["C3"].raw_output
+    # `output` is what the attacker sees, so an unscrubbed C3 note must not be it.
+    assert "16" not in by_condition["C3"].output
+
+
+@pytest.mark.parametrize("condition", ("C1", "C2"))
+def test_conditions_without_a_scrubber_leave_raw_output_empty(condition):
+    """`output` already is the raw generation; storing it twice buys nothing."""
+    store, client = FakeStore(), FakeClient()
+    run(
+        TRANSCRIPT,
+        "t1",
+        client,
+        store,
+        FakeRecord,
+        conditions=(condition,),
+        samples=1,
+        **PROVENANCE,
+    )
+    assert store.written[0].raw_output == ""
+    assert store.written[0].output == NOTE.strip()
 
 
 def test_run_skips_what_the_store_already_has():
     """Resume must not re-call the API — that is what the store is doing here."""
-    store, client = FakeStore({("defend", "C1", "t1", 0)}), FakeClient()
-    run(TRANSCRIPT, "t1", client, store, FakeRecord, conditions=("C1",), samples=2)
+    store, client = FakeStore({("defender", "C1", "t1", 0)}), FakeClient()
+    run(TRANSCRIPT, "t1", client, store, FakeRecord, conditions=("C1",), samples=2, **PROVENANCE)
 
     assert len(client.calls) == 1
     assert [r.sample for r in store.written] == [1]

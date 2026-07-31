@@ -22,6 +22,18 @@ a short transcript silently will not cache at all.
 C3 sends C1's prompt *exactly* and differs only after generation, where the note
 is piped through `src.scrubber.scrub`. `prompt_hash` therefore matches between C1
 and C3 by construction: the condition column distinguishes them, not the hash.
+C3 records both notes — `output` is the scrubbed text the attacker will see,
+`raw_output` the generation it came from. The scrubber is still being tuned, and
+re-deriving a scrubbed note from a stored raw one costs nothing where
+regenerating it costs 90 defender calls.
+
+**A truncated note is not a sample.** Thinking is on by default on Opus 5 and
+bills against `MAX_TOKENS`, so `stop_reason == "max_tokens"` is live rather than
+theoretical. A truncated note holds fewer canaries, so it scores low on T1 and T2
+and thin on T3 — while #13's denominator, conditioned on *transcript* exposure,
+counts it all the same. That biases the headline downward and leaves no trace, so
+`distill` raises rather than returning it. Read the measured thinking volume out
+of `runs/` at the pilot gate (#14) before moving the ceiling; do not move it blind.
 
 **Injected, not imported.** The client, the run store, the run-record type, and
 the scrubber all arrive as arguments, and `src.transcript` is imported inside
@@ -48,7 +60,8 @@ EFFORT = "medium"
 # budget is for reasoning plus a note, not a note. `thinking` is left unset.
 MAX_TOKENS = 16000
 
-STAGE = "defend"
+# Matches #9's documented stage vocabulary; `runs_report.summarise()` groups on it.
+STAGE = "defender"
 CONDITIONS = ("C1", "C2", "C3")
 SAMPLES = 5
 
@@ -62,8 +75,13 @@ class Usage:
     """The four counters every run record carries.
 
     #9 owns the canonical definition in `src/runs.py`; this is the same four
-    fields, kept here only so the defender runs before #9 lands. Delete it and
-    import from `src.runs` at that merge.
+    fields, kept here only so the defender runs while #9 is unmerged.
+
+    **Delete this class at that merge and `from src.runs import Usage`.** A
+    dataclass `__eq__` returns NotImplemented across two different classes, so
+    Python falls back to identity and a freshly computed usage never compares
+    equal to one read back out of `runs/` — silently, and a budget reconciliation
+    at the pilot gate is exactly the place that comparison gets made.
     """
 
     input_tokens: int
@@ -74,15 +92,22 @@ class Usage:
 
 @dataclass(frozen=True)
 class Distillation:
-    """One defender call. `note` is what would be written; for C3 it is scrubbed.
+    """One defender call. `note` is what gets written; for C3 it is scrubbed.
 
     `redactions` is how many spans C3 removed — free evidence for H1, and 0 for
     C1 and C2, which have no scrubber pass.
+
+    `raw` is C3's pre-scrub generation and is empty elsewhere, where `note` is
+    already the raw generation. It maps to `RunRecord.raw_output`, whose default
+    is `""` for the same reason: storing the note twice for two thirds of the
+    corpus buys nothing.
     """
 
     note: str
     usage: Usage
     redactions: int
+    stop_reason: str
+    raw: str = ""
 
 
 class RunStore(Protocol):
@@ -142,8 +167,19 @@ def prompt_hash(condition: str) -> str:
 def _text(reply) -> str:
     """The note. Thinking blocks are not text blocks and never reach the note."""
     note = "".join(b.text for b in reply.content if b.type == "text").strip()
+    if reply.stop_reason == "max_tokens":
+        # Checked before emptiness: a truncated note is the dangerous case
+        # precisely because it looks like a complete one. See the module docstring.
+        raise RuntimeError(
+            f"note truncated at max_tokens={MAX_TOKENS} — a partial note biases "
+            "T1/T2/T3 downward and the denominator counts it anyway"
+        )
     if not note:
         # Covers a refusal, whose content is empty, and an empty generation.
+        #
+        # Do NOT add `fallbacks` to catch the refusal. It would silently run the
+        # refused transcript on a second model and put two defenders in one
+        # results table. A refusal is a loud failure here on purpose.
         raise RuntimeError(f"no note in reply (stop_reason={reply.stop_reason!r})")
     return note
 
@@ -171,9 +207,9 @@ def distill(
     reply = client.messages.create(**request(rendered, condition, model=model, effort=effort))
     note, usage = _text(reply), _usage(reply.usage)
     if condition != "C3":
-        return Distillation(note, usage, 0)
+        return Distillation(note, usage, 0, reply.stop_reason)
     result = scrub(note)
-    return Distillation(result.text, usage, len(result.redactions))
+    return Distillation(result.text, usage, len(result.redactions), reply.stop_reason, raw=note)
 
 
 def run(
@@ -183,6 +219,8 @@ def run(
     store: RunStore,
     record: Callable[..., object],
     *,
+    git_sha: str,
+    created_at: str,
     conditions: Sequence[str] = CONDITIONS,
     samples: int = SAMPLES,
     model: str = MODEL,
@@ -193,8 +231,12 @@ def run(
 
     The skip is why the store reaches the defender at all: a re-run must not
     re-call the API. `record` is #9's `RunRecord`, passed in rather than imported
-    so this module stays runnable while #9 is on its own branch; `git_sha` and
-    `created_at` are provenance the harness stamps, not fields the defender knows.
+    so this module stays runnable while #9 is on its own branch.
+
+    `git_sha` and `created_at` are required arguments because #9's `write()`
+    deliberately reads neither the clock nor git — a value stamped at write time
+    cannot be reproduced later. Taking them here keeps this loop deterministic
+    and pushes the two non-reproducible reads out to #14, which owns the run.
     """
     written = []
     for condition in conditions:
@@ -210,10 +252,17 @@ def run(
                         transcript=transcript,
                         sample=sample,
                         output=out.note,
+                        # C3's pre-scrub generation; "" elsewhere, where `output`
+                        # already is it. Keeps `output` meaning "what the attacker
+                        # sees" so #11 cannot leak an unscrubbed C3 note, and keeps
+                        # the redaction count re-derivable without a second call.
+                        raw_output=out.raw,
                         model=model,
                         effort=effort,
                         prompt_hash=prompt_hash(condition),
                         usage=out.usage,
+                        git_sha=git_sha,
+                        created_at=created_at,
                     )
                 )
             )
@@ -221,7 +270,12 @@ def run(
 
 
 def main(argv: list[str]) -> int:
-    """python -m src.defender <transcript-id> [C1|C2|C3] — one note, to stdout."""
+    """python -m src.defender <transcript-id> [C1|C2|C3] — one note, to stdout.
+
+    A debugging aid for eyeballing a single note: it **makes a live billed call
+    and writes nothing to `runs/`**, so the output cannot be scored or re-scored
+    later. The measured run goes through `run()`, which persists every call.
+    """
     if not argv:
         print("usage: python -m src.defender <transcript-id> [C1|C2|C3]", file=sys.stderr)
         return 2
