@@ -177,6 +177,8 @@ scripts/build_fixture.py   manifest -> fixture/
 src/
   scoring.py               T1/T2 detection — deterministic, no API
   scrubber.py              C3 pass — deterministic, no API
+  runs.py                  runs/ record format + resume gate — no API
+  runs_report.py           measured spend per stage, from runs/ — no API
   defender.py              distillation, C1/C2/C3      [calls a model]
   attacker.py              note-only adversary          [calls a model]
 prompts/
