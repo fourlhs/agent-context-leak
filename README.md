@@ -74,6 +74,29 @@ than prefix matching.
 The fixture repository is generated from `canaries/manifest.yaml` and is gitignored. The manifest is
 the only source of truth.
 
+### The corpus guard
+
+`transcripts/` **is** committed — the corpus is part of the benchmark — so an unscrubbed real session
+would be one `git add -A` away from a permanent public commit. `src/transcript_guard.py` reads the
+**staged** bytes of anything under `transcripts/` and blocks the commit when a rule fires: an
+undeclared high-entropy token, a credential shape, a vendor key prefix, a home directory that is not
+one of the synthetic ones, or a hostname outside the reserved `.example` / `.internal` TLDs. The
+manifest supplies the whitelist, so the declared canaries pass and everything else does not.
+
+```sh
+git config core.hooksPath .githooks          # enable the pre-commit hook, once per clone
+uv run python -m src.transcript_guard        # the same check by hand, on the staged files
+uv run python -m src.transcript_guard FILE   # or on named files, for review
+```
+
+It is deliberately noisy: a full git SHA or a UUID reads as random because by shape it is. Set
+`CANARY_GUARD_OVERRIDE=1` to commit past a finding — `git commit --no-verify` is too invisible to
+count as a decision, and the failure message says what you are overriding.
+
+The guard is **not** the C3 scrubber and shares no code with it. `src/scrubber.py` is the mechanism
+under test and stays manifest-blind; the guard is a safety net for us and reads the manifest freely.
+Coupling them would let a guard tuned to stop nagging us silently tune the thing being measured.
+
 ## Reproducing
 
 Tooling is [uv](https://docs.astral.sh/uv/): `pip install uv`. On Windows pip installs the `uv`
@@ -110,6 +133,8 @@ src/scrubber.py            C3 pass (deterministic)
 src/defender.py            distillation, C1/C2/C3
 src/attacker.py            note-only adversary
 src/aggregate.py           exposure-conditioned rates + T3_net (deterministic)
+src/transcript_guard.py    staged-transcript guard (deterministic)
+.githooks/pre-commit       runs the guard before every commit
 transcripts/               session transcripts
 runs/                      raw outputs + token usage (not committed)
 results/                   scored CSV — scratch, ignored

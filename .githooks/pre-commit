@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuse a commit that stages an unscrubbed transcript (#22).
+#
+# Enable once per clone -- .git/hooks is not versioned, this directory is:
+#
+#     git config core.hooksPath .githooks
+#
+# To commit past a finding, set CANARY_GUARD_OVERRIDE=1. The guard prints what
+# that means before you do.
+if command -v uv >/dev/null 2>&1; then
+	exec uv run --frozen python -m src.transcript_guard
+fi
+# On Windows pip does not put `uv` on PATH; the README says to use `python -m uv`.
+if python -c "import uv" >/dev/null 2>&1; then
+	exec python -m uv run --frozen python -m src.transcript_guard
+fi
+exec python -m src.transcript_guard
