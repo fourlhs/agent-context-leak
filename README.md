@@ -109,9 +109,11 @@ src/scoring.py             T1/T2 detection (deterministic)
 src/scrubber.py            C3 pass (deterministic)
 src/defender.py            distillation, C1/C2/C3
 src/attacker.py            note-only adversary
+src/aggregate.py           exposure-conditioned rates + T3_net (deterministic)
 transcripts/               session transcripts
-runs/                      raw outputs + token usage
-results/                   scored CSV
+runs/                      raw outputs + token usage (not committed)
+results/                   scored CSV — scratch, ignored
+results/final/             the published numbers, tracked
 ```
 
 Design notes, conventions, and open questions live in `CLAUDE.md`.
