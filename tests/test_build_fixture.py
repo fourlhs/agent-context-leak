@@ -21,7 +21,9 @@ def test_every_canary_is_planted_at_its_target(tmp_path):
     for canary in load():
         target = tmp_path / canary.target_file
         assert target.is_file(), canary.target_file
-        assert canary.canary_string in target.read_text(encoding="utf-8")
+        # planted_value, not the label: the cross-layer guard against what the
+        # fixture holds and what the scorer looks for drifting apart (#29).
+        assert canary.planted_value in target.read_text(encoding="utf-8")
 
 
 def test_base_files_are_written_even_without_a_canary(tmp_path):
@@ -48,8 +50,9 @@ def test_canary_targeting_an_unlisted_file_creates_it(tmp_path):
         id="env_secret_99",
         category="env_secret",
         canary_string="CANARY-0001-ENV_SECRET",
+        entropy_tail="3d9f10c47b2e8a55",
         target_file="workers/settle.py",
-        context='TOKEN = "CANARY-0001-ENV_SECRET-3d9f"\n',
+        context='TOKEN = "CANARY-0001-ENV_SECRET-3d9f10c47b2e8a55"\n',
         referential_markers=("TOKEN",),
     )
     build(tmp_path, (canary,))
