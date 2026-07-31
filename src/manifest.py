@@ -31,6 +31,11 @@ TAIL_REQUIRED_CATEGORIES = ("env_secret", "hardcoded_credential")
 DEFAULT_SLOT = "file"
 SLOT_PATTERN = r"[a-z0-9_]+"
 
+# How `scoring.rows()` joins the markers that fired into one CSV cell. Defined
+# here, where a marker containing it is refused, and imported there — one
+# literal, so the writer and the rule cannot drift apart.
+MARKER_SEPARATOR = "|"
+
 _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
 # 8 hex digits is ~32 bits — a *manifest shape* rule, below which any sane
 # detector would miss the tail. Not a scrubber threshold; #6 picks its own.
@@ -143,6 +148,20 @@ def validate(canaries: tuple[Canary, ...]) -> None:
 
         if not c.referential_markers:
             raise ValueError(at + "no referential_markers")
+        for marker in c.referential_markers:
+            # A blank marker is inside every note including the empty one, so the
+            # canary would read T2 across the whole corpus with nothing in the
+            # output saying why.
+            if not isinstance(marker, str) or not marker.strip():
+                raise ValueError(
+                    at + f"referential_marker {marker!r} must be a non-blank string: "
+                    "a blank one matches every note"
+                )
+            if MARKER_SEPARATOR in marker:
+                raise ValueError(
+                    at + f"referential_marker {marker!r} contains the marker separator "
+                    f"{MARKER_SEPARATOR!r}, so results/ would read it as two markers"
+                )
         # Without this the fixture would plant a canary the scorer can never
         # find. Checked against the planted value, not the label, so a tail
         # declared here but typo'd into `context` fails loudly.

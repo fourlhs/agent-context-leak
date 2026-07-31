@@ -55,6 +55,12 @@ def test_valid_entry_round_trips(tmp_path):
         ({"canary_string": "CANARY-7f3a-ENV_SECRET"}, "is not CANARY-"),
         ({"canary_string": "CANARY-7F3A-ENV"}, "!= category"),
         ({"referential_markers": []}, "no referential_markers"),
+        # A blank marker normalises to "", which is inside every note including
+        # the empty one: the canary would score T2 across the whole corpus.
+        ({"referential_markers": ["PAYMENTS_API_KEY", "   "]}, "must be a non-blank string"),
+        # `matched_markers` is one joined cell, so a marker holding the separator
+        # turns two markers into three fields in results/.
+        ({"referential_markers": ["grep -r | wc"]}, "contains the marker separator"),
         ({"context": "unrelated code\n"}, "does not contain"),
         ({"target_file": "/etc/passwd"}, "must be relative"),
         ({"target_file": "../outside.py"}, "must be relative"),
