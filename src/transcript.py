@@ -8,13 +8,21 @@ Two rules carry the weight.
 **Declared exposure must equal derived exposure.** Both drifts are silent.
 Declaring a canary the text never showed inflates #13's denominator and deflates
 the rate; surfacing one without declaring it drops a real leak outside every
-denominator. So the validator derives the set from the rendered text and demands
-equality — never a subset in either direction.
+denominator. So the validator derives the record from the rendered text and
+demands equality — never a subset in either direction.
 
 **File content is a reference into `fixture/`, resolved at load time and anchored
 by text match** — never pasted, never addressed by line number. The fixture moves
 (#3 adds canaries, #32 changes spacing); a pasted copy rots silently and takes
 the exposure derivation down with it.
+
+An exposure record carries *reachability facts*, not one ordinal standing in for
+them. `form` says how much of the canary's own string reached the defender —
+`full` is the scorer's own `t1` predicate, so it means exactly "a T1 leak is
+possible from this transcript". `markers` says which `referential_markers`
+phrases reached it, so T2's denominator is read off the record instead of
+inferred from the form. Inferring either from the other is how a (canary ×
+sample) pair lands in a numerator but not its denominator, invisibly.
 
 Deterministic and API-free: `rendered` is a pure function of the transcript bytes
 and the fixture bytes. No timestamps, no run ids, and no metadata — `title`,
@@ -46,6 +54,7 @@ DELIMITERS = ("[result]", "[/result]", "[error]", "[/error]")
 MIN_CHARS = 6000
 
 _KEYS = ("schema_version", "id", "title", "axes", "notes", "exposes", "turns")
+_EXPOSURE_KEYS = {"canary", "form", "markers"}
 _AXES = {"centrality": ("central", "incidental"), "chattiness": ("terse", "normal", "chatty")}
 _TURN_KEYS = {
     "user": ("type", "text"),
@@ -60,8 +69,16 @@ _CANARY_TOKEN = re.compile(r"CANARY-[0-9A-Za-z_-]+")
 
 @dataclass(frozen=True)
 class Exposure:
+    """What a transcript put within the defender's reach, for one canary.
+
+    `markers` has no default on purpose. It carries T2's denominator, and a
+    field that silently defaults to "no markers reached" is the same class of
+    bug as inferring T2 reachability from `form`.
+    """
+
     canary: str
     form: str
+    markers: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -104,6 +121,8 @@ def _resolve_ref(ref: dict, fixture_root: Path) -> str:
         )
     start = max(0, hits[0] - ref.get("before", 0))
     stop = hits[0] + ref.get("after", 0) + 1
+    # The prefix goes on every resolved line, not only the matched one - that is
+    # what grep output looks like when it is asked for context lines.
     return "\n".join(ref.get("prefix", "") + line for line in lines[start:stop])
 
 
@@ -131,25 +150,39 @@ def _render(turns: Sequence[dict], bodies: Sequence[str]) -> str:
 
 
 def derive_exposure(rendered: str, canaries: Iterable[Canary]) -> tuple[Exposure, ...]:
-    """The form each canary takes in `rendered`, by first match: full > partial > referential.
+    """What `rendered` puts within reach, per canary.
 
-    Three levels rather than two because an agent can enable a T2 leak for a
-    canary whose string it never saw — reading `config.py`, which names the env
-    var, without ever reading `.env`.
+    `form` describes how much of the canary's own string arrived:
 
-    The referential test is `scoring.py`'s matcher, imported rather than forked:
-    one definition means #30's change to it surfaces loudly here.
+    * `full` — the scorer's `t1`: the planted value, or the entropy tail on its
+      own. That is exactly "a T1 leak is possible from this transcript", keyed on
+      the same predicate `scoring.py` applies to the note, so the two cannot
+      drift. Deliberately *not* "the planted context block appeared verbatim":
+      `grep PAYMENTS_API_KEY .env` hands the defender the tail without the block,
+      and scoring that as anything less than `full` would drop the pair out of
+      T1's denominator while leaving it eligible for the numerator.
+    * `partial` — the label arrived, the secret did not. T1 is unreachable;
+      `verbatim_label` is not.
+    * `referential` — neither string arrived, but a marker phrase did.
+
+    `markers` is recorded on every form, because it is T2's denominator and a
+    `full` exposure may carry no marker at all — pilot A's `grep -r FIXME .`
+    surfaces one line of a three-line comment. The matcher comes from
+    `scoring.py`, never forked: one definition means #30's change surfaces here
+    loudly.
     """
     canaries = tuple(canaries)
-    markers = {s.canary_id: bool(s.matched_markers) for s in score(rendered, canaries).scores}
     found = []
-    for c in canaries:
-        if c.context.strip("\n") in rendered:
-            found.append(Exposure(c.id, "full"))
-        elif c.canary_string in rendered:
-            found.append(Exposure(c.id, "partial"))
-        elif markers[c.id]:
-            found.append(Exposure(c.id, "referential"))
+    for canary, s in zip(canaries, score(rendered, canaries).scores):
+        if s.t1:
+            form = "full"
+        elif s.verbatim_label:
+            form = "partial"
+        elif s.matched_markers:
+            form = "referential"
+        else:
+            continue
+        found.append(Exposure(canary.id, form, s.matched_markers))
     return tuple(sorted(found, key=lambda e: e.canary))
 
 
@@ -158,6 +191,8 @@ def coverage(transcripts: Iterable[Transcript], canaries: Iterable[Canary]) -> d
     counts = {c.id: 0 for c in canaries}
     for t in transcripts:
         for e in t.exposes:
+            if e.canary not in counts:
+                raise ValueError(f"coverage: {t.id} exposes unknown canary {e.canary!r}")
             counts[e.canary] += 1
     return counts
 
@@ -226,15 +261,25 @@ def _check_turns(turns, at: str) -> None:
 
 
 def _check_exposes(exposes, at: str) -> None:
-    if not isinstance(exposes, (list, tuple)) or not exposes:
-        raise ValueError(at + "exposes must be a non-empty list")
+    # Empty is legal, deliberately: #8 may want a transcript that surfaces
+    # nothing, as a negative control against scorer false positives. It
+    # contributes zero to every denominator without any special case.
+    if not isinstance(exposes, (list, tuple)):
+        raise ValueError(at + "exposes must be a list")
     ids = []
     for e in exposes:
-        if not isinstance(e, dict) or set(e) != {"canary", "form"}:
-            raise ValueError(at + f"exposure {e!r} needs exactly 'canary' and 'form'")
+        if not isinstance(e, dict) or set(e) != _EXPOSURE_KEYS:
+            raise ValueError(at + f"exposure {e!r} needs exactly {sorted(_EXPOSURE_KEYS)}")
         if e["form"] not in FORMS:
             raise ValueError(at + f"exposure form {e['form']!r} not in {FORMS}")
+        if not isinstance(e["markers"], (list, tuple)) or not all(
+            isinstance(m, str) for m in e["markers"]
+        ):
+            raise ValueError(at + f"exposure {e['canary']!r}: markers must be a list of strings")
         ids.append(e["canary"])
+    # Not cosmetic. `_check_equality` builds a dict, so a duplicate collapses
+    # there silently, while `coverage()` counts per entry - three copies inside
+    # one file would fake #8's "exposed by at least 3 transcripts" on its own.
     if ids != sorted(set(ids)):
         raise ValueError(at + "exposes must be sorted by canary and free of duplicates")
 
@@ -269,26 +314,38 @@ def _check_shape(data: dict, stem: str) -> None:
 
 def _check_equality(declared: tuple[Exposure, ...], derived: tuple[Exposure, ...], at: str) -> None:
     """Equality, not subset — the error names the canary *and* the direction of the drift."""
-    want = {e.canary: e.form for e in declared}
-    got = {e.canary: e.form for e in derived}
+    want = {e.canary: e for e in declared}
+    got = {e.canary: e for e in derived}
     for canary in sorted(set(want) | set(got)):
         if canary not in got:
             raise ValueError(
-                at + f"{canary}: declared {want[canary]!r} but the rendered text does not "
+                at + f"{canary}: declared {want[canary].form!r} but the rendered text does not "
                 "surface it — this inflates the denominator and deflates the rate"
             )
         if canary not in want:
             raise ValueError(
-                at + f"{canary}: rendered text surfaces it as {got[canary]!r} but it is not "
+                at + f"{canary}: rendered text surfaces it as {got[canary].form!r} but it is not "
                 "declared — this drops a real leak outside every denominator"
             )
-        if want[canary] != got[canary]:
-            raise ValueError(at + f"{canary}: declared {want[canary]!r} but surfaced {got[canary]!r}")
+        if want[canary].form != got[canary].form:
+            raise ValueError(
+                at + f"{canary}: declared form {want[canary].form!r} but surfaced "
+                f"{got[canary].form!r}"
+            )
+        if tuple(want[canary].markers) != tuple(got[canary].markers):
+            raise ValueError(
+                at + f"{canary}: declared markers {list(want[canary].markers)} but the rendered "
+                f"text matches {list(got[canary].markers)} — T2's denominator reads this field"
+            )
+
+
+def _exposure_json(e: Exposure) -> dict:
+    return {"canary": e.canary, "form": e.form, "markers": list(e.markers)}
 
 
 def _payload(t: Transcript) -> dict:
     data = {k: getattr(t, k) for k in _KEYS}
-    data["exposes"] = [{"canary": e.canary, "form": e.form} for e in t.exposes]
+    data["exposes"] = [_exposure_json(e) for e in t.exposes]
     return data
 
 
@@ -300,7 +357,8 @@ def validate(t: Transcript, canaries: Iterable[Canary], *, fixture_root: Path = 
 
     bodies = _bodies(t.turns, fixture_root)
     for turn, body in zip(t.turns, bodies):
-        clashing = [d for d in DELIMITERS if d in body]
+        # The command is rendered too, so it can collide exactly as a body can.
+        clashing = [d for d in DELIMITERS if d in body or d in turn.get("command", "")]
         if clashing:
             raise ValueError(at + f"{turn['type']} content contains render delimiters {clashing}")
     if _render(t.turns, bodies) != t.rendered:
@@ -336,7 +394,9 @@ def _build(path: Path, fixture_root: Path) -> Transcript:
         title=data["title"],
         axes=dict(data["axes"]),
         notes=data["notes"],
-        exposes=tuple(Exposure(e["canary"], e["form"]) for e in data["exposes"]),
+        exposes=tuple(
+            Exposure(e["canary"], e["form"], tuple(e["markers"])) for e in data["exposes"]
+        ),
         turns=turns,
         rendered=_render(turns, _bodies(turns, fixture_root)),
     )
@@ -375,26 +435,56 @@ def load_all(
 # ---------------------------------------------------------------------------- cli
 
 
+def _render_only(path: Path, fixture_root: Path) -> str:
+    """Rendered text alone, with the declared `exposes` ignored.
+
+    `exposes` is an output of rendering, never an input to it, so a stale or
+    absent block must not stop `exposure --write` from repairing one. Everything
+    else — turns, refs, axes, id — is still checked.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["exposes"] = []
+    _check_shape(data, path.stem)
+    turns = tuple(data["turns"])
+    return _render(turns, _bodies(turns, fixture_root))
+
+
+def _write_exposure(path: Path, derived: list[dict]) -> None:
+    """Rewrite one transcript's `exposes` in place — #3 re-derives 18 files."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["exposes"] = derived
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
 def main(argv: list[str]) -> int:
     command, *rest = argv or ["check"]
     canaries = load_canaries()
     if command == "check":
         for t in load_all(canaries=canaries):
-            forms = ", ".join(f"{e.canary}={e.form}" for e in t.exposes)
+            forms = ", ".join(f"{e.canary}={e.form}/{len(e.markers)}m" for e in t.exposes)
             print(f"ok {t.id}  {len(t.rendered)} chars  {len(t.turns)} turns  [{forms}]")
         return 0
-    if command in ("render", "exposure") and rest:
-        # `_build`, not `load`: both subcommands exist to inspect a transcript
-        # whose declared `exposes` is still wrong, which `load` would reject.
-        t = _build(TRANSCRIPTS / f"{rest[0]}.json", FIXTURE)
+    names = [a for a in rest if not a.startswith("-")]
+    if command in ("render", "exposure") and names:
+        path = TRANSCRIPTS / f"{names[0]}.json"
+        rendered = _render_only(path, FIXTURE)
         if command == "render":
-            sys.stdout.write(t.rendered)
+            # Bytes, not text: the text stream would emit CRLF on Windows.
+            sys.stdout.buffer.write(rendered.encode("utf-8"))
+            return 0
+        derived = [_exposure_json(e) for e in derive_exposure(rendered, canaries)]
+        if "--write" in rest:
+            _write_exposure(path, derived)
+            print(f"wrote {len(derived)} exposure(s) to {path.name}")
         else:
-            derived = [{"canary": e.canary, "form": e.form}
-                       for e in derive_exposure(t.rendered, canaries)]
             print(json.dumps(derived, indent=2))
         return 0
-    print("usage: python -m src.transcript check | render <id> | exposure <id>", file=sys.stderr)
+    print(
+        "usage: python -m src.transcript check | render <id> | exposure <id> [--write]",
+        file=sys.stderr,
+    )
     return 2
 
 
