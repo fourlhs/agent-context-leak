@@ -56,7 +56,17 @@ class Canary:
 
         A property rather than a stored field so it cannot drift out of sync
         with its two parts, and so `dataclasses.replace` keeps working.
+
+        Raises rather than degrades on a bad tail: falling back to the label
+        would silently reinstate the #29 bug for any construction site that
+        bypasses `validate()`, which is the failure mode this field exists to
+        remove.
         """
+        if not isinstance(self.entropy_tail, str):
+            raise TypeError(
+                f"{self.id}: entropy_tail must be a str, "
+                f"got {type(self.entropy_tail).__name__}"
+            )
         if not self.entropy_tail:
             return self.canary_string
         return f"{self.canary_string}-{self.entropy_tail}"
@@ -83,6 +93,7 @@ def validate(canaries: tuple[Canary, ...]) -> None:
     """Raise ValueError describing the first problem found."""
     seen_ids: set[str] = set()
     seen_strings: set[str] = set()
+    seen_tails: set[str] = set()
 
     for c in canaries:
         at = f"{c.id}: "
@@ -99,8 +110,9 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         if match.group(1) != c.category.upper():
             raise ValueError(at + f"suffix {match.group(1)!r} != category {c.category!r}")
 
-        # Must precede any use of planted_value: a null tail from a bare
-        # `entropy_tail:` would otherwise raise TypeError instead of this.
+        # Must precede any use of planted_value, which raises TypeError on a
+        # non-str tail — a bare `entropy_tail:` would otherwise surface as that
+        # rather than as this ValueError.
         if not isinstance(c.entropy_tail, str) or not (
             c.entropy_tail == "" or _TAIL.fullmatch(c.entropy_tail)
         ):
@@ -113,6 +125,10 @@ def validate(canaries: tuple[Canary, ...]) -> None:
                 at + f"category {c.category!r} is secret-shaped, so C3 needs a real "
                 "entropy target: entropy_tail may not be empty"
             )
+        # The tail is a needle in its own right, so a shared one would let a
+        # leak of this canary score against another.
+        if c.entropy_tail and c.entropy_tail in seen_tails:
+            raise ValueError(at + f"duplicate entropy_tail {c.entropy_tail}")
 
         if not c.referential_markers:
             raise ValueError(at + "no referential_markers")
@@ -128,3 +144,4 @@ def validate(canaries: tuple[Canary, ...]) -> None:
 
         seen_ids.add(c.id)
         seen_strings.add(c.canary_string)
+        seen_tails.add(c.entropy_tail)
