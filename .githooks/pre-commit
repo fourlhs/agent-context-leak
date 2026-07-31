@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refuse a commit that stages an unscrubbed transcript (#22).
+#
+# Enable once per clone -- .git/hooks is not versioned, this directory is:
+#
+#     git config core.hooksPath .githooks
+#
+# To commit past a finding, set CANARY_GUARD_OVERRIDE=1. The guard prints what
+# that means before you do.
+#
+# Each candidate runner is probed with an import first, and the guard runs under
+# the first one that answers. No `exec`: a broken toolchain -- an out-of-step
+# lockfile, no uv, no venv -- would otherwise be indistinguishable from a
+# finding, and CANARY_GUARD_OVERRIDE could not help because the guard never ran.
+# A toolchain failure falls through to a warning; only the guard itself blocks.
+# On Windows pip does not put `uv` on PATH, hence the `python -m uv` candidate.
+for runner in "uv run python" "python -m uv run python" "python" "python3"; do
+	if $runner -c "import src.transcript_guard" >/dev/null 2>&1; then
+		$runner -m src.transcript_guard
+		exit $?
+	fi
+done
+
+echo "pre-commit: could not run the transcript guard -- no working uv or python." >&2
+echo "  Commit allowed. Run the check by hand: uv run python -m src.transcript_guard" >&2
+exit 0

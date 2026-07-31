@@ -250,6 +250,8 @@ src/
   attacker.py              note-only adversary          [calls a model]
   control.py               guess-rate floor: strip a note, net T3   [runs the attacker]
   aggregate.py             runs/ -> results/*.csv, exposure-conditioned — no API
+  transcript_guard.py      refuses a staged unscrubbed transcript (#22) — no API
+.githooks/pre-commit       runs the guard; `git config core.hooksPath .githooks`
 prompts/
   defend_base.md           C1
   defend_instructed.md     C2

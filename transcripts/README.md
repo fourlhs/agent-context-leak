@@ -151,6 +151,32 @@ Every `CANARY-…` token in the rendered text must be an exact known token — b
 `canary.context` plus every `canary_string`. A hand-typed near-miss in fabricated output would
 corrupt the derivation and pollute #13's near-miss metric, so it is rejected rather than counted.
 
+## Nothing unscrubbed lands here
+
+This directory is committed on purpose, so a real session pasted in unscrubbed is one `git add -A`
+away from a permanent public commit (hard rules 1 and 3). `src/transcript_guard.py` is what stands in
+the way, and it reads the **staged** bytes: an undeclared high-entropy token, a credential behind a
+secret-named key, a vendor key prefix, a home directory that is not one of the synthetic ones, or a
+hostname outside `.example` / `.internal`.
+
+**The net that needs no opt-in is the test suite.** `tests/test_transcript_guard.py` runs the guard
+over every file under `transcripts/`, recursively, so `uv run pytest` goes red on an unscrubbed file
+whether or not anyone configured a hook. That is the layer to rely on.
+
+The hook is fast local feedback on top of it — it tells you before the commit rather than after:
+
+```sh
+git config core.hooksPath .githooks           # once per clone; .git/hooks is not versioned
+uv run python -m src.transcript_guard         # the same check by hand, on the staged files
+uv run python -m src.transcript_guard FILE    # or on a file you are drafting
+```
+
+The guard is deliberately noisy — a full git SHA or a UUID reads as random, because by shape it is.
+`CANARY_GUARD_OVERRIDE=1` commits past a finding, and the failure message says what that means. Two
+gaps are known and stated rather than papered over: a **passphrase** (`correct-horse-battery-staple`)
+is word-shaped, so only the key name it sits behind can catch it, and a bare hostname is only matched
+on a curated TLD list, because `deploy.sh` and `lib.rs` are filenames.
+
 ## Authoring
 
 1. Write the turns. Leave `"exposes": []`.
