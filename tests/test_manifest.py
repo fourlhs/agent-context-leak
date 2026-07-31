@@ -1,4 +1,5 @@
 import dataclasses
+from collections import Counter
 
 import pytest
 import yaml
@@ -38,8 +39,20 @@ def write(tmp_path, *entries):
 
 def test_committed_manifest_is_valid():
     canaries = load()
-    assert len(canaries) == 2
-    assert {c.category for c in canaries} <= set(CATEGORIES)
+    assert len(canaries) == 12
+    assert {c.category for c in canaries} == set(CATEGORIES)
+
+
+def test_committed_manifest_has_two_canaries_per_category():
+    """#3's shape: even coverage, so no category's rate rests on a single entry."""
+    counts = Counter(c.category for c in load())
+    assert counts == {category: 2 for category in CATEGORIES}
+
+
+def test_no_two_canaries_share_a_placement():
+    """Two in one slot land consecutively and read as a planted list (#32)."""
+    places = [(c.target_file, c.slot) for c in load()]
+    assert len(set(places)) == len(places)
 
 
 def test_valid_entry_round_trips(tmp_path):
