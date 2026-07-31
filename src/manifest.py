@@ -25,10 +25,17 @@ DEFAULT_PATH = Path(__file__).resolve().parents[1] / "canaries" / "manifest.yaml
 # target. A floor, not a ceiling — #3 may give other categories tails too.
 TAIL_REQUIRED_CATEGORIES = ("env_secret", "hardcoded_credential")
 
+# Where in the target file a canary lands. Every base file declares this slot, so
+# an entry that names none behaves as it always did. SLOT_PATTERN is shared with
+# the fixture generator, which interpolates it into its marker regex.
+DEFAULT_SLOT = "file"
+SLOT_PATTERN = r"[a-z0-9_]+"
+
 _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
 # 8 hex digits is ~32 bits — a *manifest shape* rule, below which any sane
 # detector would miss the tail. Not a scrubber threshold; #6 picks its own.
 _TAIL = re.compile(r"[0-9a-f]{8,}")
+_SLOT = re.compile(SLOT_PATTERN)
 _FIELDS = (
     "id",
     "category",
@@ -38,6 +45,8 @@ _FIELDS = (
     "context",
     "referential_markers",
 )
+# Optional, so #3 does not have to write ten entries twice.
+_OPTIONAL_FIELDS = ("slot",)
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,7 @@ class Canary:
     target_file: str
     context: str
     referential_markers: tuple[str, ...]
+    slot: str = DEFAULT_SLOT
 
     @property
     def planted_value(self) -> str:
@@ -82,7 +92,7 @@ def load(path: Path = DEFAULT_PATH) -> tuple[Canary, ...]:
 
 def _build(entry: dict, index: int) -> Canary:
     missing = [f for f in _FIELDS if f not in entry]
-    unexpected = [k for k in entry if k not in _FIELDS]
+    unexpected = [k for k in entry if k not in _FIELDS + _OPTIONAL_FIELDS]
     if missing or unexpected:
         raise ValueError(f"entry {index}: missing {missing}, unexpected {unexpected}")
     markers = tuple(entry["referential_markers"])
@@ -94,6 +104,7 @@ def validate(canaries: tuple[Canary, ...]) -> None:
     seen_ids: set[str] = set()
     seen_strings: set[str] = set()
     seen_tails: set[str] = set()
+    seen_places: set[tuple[str, str]] = set()
 
     for c in canaries:
         at = f"{c.id}: "
@@ -138,6 +149,25 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         if c.planted_value not in c.context:
             raise ValueError(at + "context does not contain the planted value")
 
+        # The slot is interpolated into the fixture's marker pattern, so anything
+        # outside this charset would simply never match and the canary would land
+        # somewhere else without saying so.
+        if not isinstance(c.slot, str) or not _SLOT.fullmatch(c.slot):
+            raise ValueError(
+                at + f"slot {c.slot!r} must match {SLOT_PATTERN} — the fixture's "
+                "marker pattern would never find it"
+            )
+        # Two canaries at one slot land consecutively, which is the list of
+        # secrets bolted to the top of a file that #32 removed. The generator
+        # still renders it; the manifest is where it gets refused, because
+        # `slot` defaulting means stacking is what you get by not thinking.
+        if (c.target_file, c.slot) in seen_places:
+            raise ValueError(
+                at + f"another canary already fills slot {c.slot!r} in "
+                f"{c.target_file}; two there read as a planted list — give one of "
+                "them a different slot (scripts/build_fixture.py lists them)"
+            )
+
         target = PurePosixPath(c.target_file)
         if target.is_absolute() or ".." in target.parts:
             raise ValueError(at + f"target_file {c.target_file!r} must be relative to fixture/")
@@ -145,3 +175,4 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         seen_ids.add(c.id)
         seen_strings.add(c.canary_string)
         seen_tails.add(c.entropy_tail)
+        seen_places.add((c.target_file, c.slot))
