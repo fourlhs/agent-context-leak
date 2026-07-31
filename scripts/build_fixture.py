@@ -274,9 +274,6 @@ Refunds are only allowed on invoices in `paid`.
 
 
 def _render(base: str, canaries: list[Canary]) -> str:
-    # git checks this source file out with CRLF where core.autocrlf is set, which
-    # would put \r inside the literals below and hide MARKER from the check.
-    base = base.replace("\r\n", "\n")
     block = "\n".join(c.context.strip("\n") + "\n" for c in canaries)
     text = base.replace(MARKER, block) if MARKER in base else base + block
     return text.rstrip() + "\n"

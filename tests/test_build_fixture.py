@@ -2,7 +2,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from scripts.build_fixture import BASE, MARKER, _render, build
+from scripts.build_fixture import BASE, MARKER, build
 from src.manifest import Canary, load
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,13 +54,6 @@ def test_canary_targeting_an_unlisted_file_creates_it(tmp_path):
     )
     build(tmp_path, (canary,))
     assert (tmp_path / "workers/settle.py").read_text(encoding="utf-8") == canary.context
-
-
-def test_crlf_checkout_of_this_source_file_still_yields_lf_output():
-    """core.autocrlf puts \\r in the BASE literals on a fresh Windows clone."""
-    out = _render("import os\r\n\r\n%%CANARY%%\r\n\r\ndef f():\r\n    pass\r\n", [])
-    assert "\r" not in out
-    assert MARKER.strip() not in out
 
 
 def test_fixture_directory_is_gitignored():

@@ -1,0 +1,12 @@
+# Normalise every text file to LF, in the repository and in the working tree.
+#
+# core.autocrlf is enabled system-wide on at least one dev machine, so without
+# this a checkout rewrites every text file to CRLF. That does not break
+# anything - CPython normalises line endings when reading source, and the
+# fixture writer opens files with newline="\n" - but it does make whole-file
+# diffs and spurious conflicts once two people edit the same files.
+* text=auto eol=lf
+
+# Never line-ending-convert binaries. Plots land here in #17.
+*.png binary
+*.pdf binary
