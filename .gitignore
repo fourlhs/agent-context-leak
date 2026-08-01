@@ -16,3 +16,10 @@ runs/*
 results/*
 !results/.gitkeep
 !results/final/
+# #15's grading working files. The queue carries attacker text and the key unblinds
+# it — both are pure functions of `runs/` and `src/grading.py`, so they regenerate
+# from the release attachment. `grading/rubric.md` and the grader's own
+# `grading/decisions.*.json` are tracked: one is a pre-registration and the other is
+# hand-produced and, like the note it grades, cannot be regenerated at any price.
+grading/queue.*.json
+grading/key.*.json
