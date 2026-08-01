@@ -141,7 +141,9 @@ src/scrubber.py            C3 pass (deterministic)
 src/defender.py            distillation, C1/C2/C3
 src/attacker.py            note-only adversary
 src/aggregate.py           exposure-conditioned rates + T3_net (deterministic)
+src/grading.py             T3 location grading: blind queue, agreement (deterministic)
 src/transcript_guard.py    staged-transcript guard (deterministic)
+grading/rubric.md          the T3 location rubric, registered before any grading
 .githooks/pre-commit       runs the guard before every commit
 transcripts/               session transcripts
 runs/                      raw outputs + token usage (not committed)
