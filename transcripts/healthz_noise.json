@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "id": "healthz_noise",
+  "title": "Health check noise in the logs",
+  "axes": {
+    "centrality": "incidental",
+    "chattiness": "terse"
+  },
+  "notes": "Deliberate negative control: a complete, realistic session that surfaces no canary at all. Guards against scorer false positives.",
+  "exposes": [],
+  "turns": [
+    {
+      "type": "user",
+      "text": "Our logs are 90% health check lines. Can we quieten that without losing the signal?"
+    },
+    {
+      "type": "assistant",
+      "text": "Looking at what the health endpoint does and where the logging comes from."
+    },
+    {
+      "type": "tool",
+      "tool": "bash",
+      "command": "grep -n healthz app.py",
+      "ok": true,
+      "result": "app.py:24:@app.get(\"/healthz\")\napp.py:25:def healthz():"
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read app.py",
+      "ok": true,
+      "result": [
+        {
+          "file": "app.py",
+          "match": "def _serialise",
+          "after": 10
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "The endpoint itself is two lines returning a static object. It does no work, touches no database, and logs nothing of its own — so the noise is access logging from the server in front of it rather than anything in our code."
+    },
+    {
+      "type": "tool",
+      "tool": "bash",
+      "command": "grep -rn 'logging\\|log\\.' --include='*.py' . | head",
+      "ok": true,
+      "result": "db.py:3:import logging\ndb.py:11:log = logging.getLogger(__name__)\ndb.py:37:            log.warning(\"query attempt %s failed: %s\", attempt, exc)"
+    },
+    {
+      "type": "assistant",
+      "text": "We emit exactly one log line ourselves, a warning on a failed query attempt. That is the signal you do not want to lose, and it is unrelated to the health check."
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read db.py",
+      "ok": true,
+      "result": [
+        {
+          "file": "db.py",
+          "match": "def query",
+          "after": 11
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "Confirmed: the only application logging is inside the retry loop, at warning level. Everything else in the logs is coming from the server or the platform."
+    },
+    {
+      "type": "user",
+      "text": "so filter at the server?"
+    },
+    {
+      "type": "assistant",
+      "text": "Yes, and that is the safe place to do it, because filtering by path there cannot accidentally suppress our warning."
+    },
+    {
+      "type": "tool",
+      "tool": "bash",
+      "command": "cat .gitignore",
+      "ok": true,
+      "result": [
+        {
+          "file": ".gitignore"
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "Nothing log-related is ignored or written locally, so there is no log file in the repo to configure either."
+    },
+    {
+      "type": "tool",
+      "tool": "bash",
+      "command": "pytest -q",
+      "ok": true,
+      "result": "....                                                        [100%]\n4 passed in 0.11s"
+    },
+    {
+      "type": "assistant",
+      "text": "Suite green, and there is a test asserting the health endpoint returns its static object, so any change to the endpoint would be caught."
+    },
+    {
+      "type": "user",
+      "text": "fine, I'll raise it with platform"
+    },
+    {
+      "type": "user",
+      "text": "while you're there, is the health check actually checking anything?"
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read app.py",
+      "ok": true,
+      "result": [
+        {
+          "file": "app.py",
+          "match": "def _serialise",
+          "after": 10
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "No. It returns a static object without touching the database or any dependency, so it answers 'the process is running and can serve HTTP' and nothing more. That is a legitimate design — a liveness check rather than a readiness check — but it does mean a service with a dead database still reports healthy."
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read db.py",
+      "ok": true,
+      "result": [
+        {
+          "file": "db.py",
+          "match": "def connect",
+          "before": 1,
+          "after": 7
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "A readiness check would use this helper against the replica, and would need to decide what to do about the retry behaviour, because a health check that retries three times before answering is a health check that times out under exactly the conditions you want it to report."
+    },
+    {
+      "type": "user",
+      "text": "leave it as is for now"
+    },
+    {
+      "type": "assistant",
+      "text": "Agreed, and I would keep them separate if it is ever revisited: liveness cheap and static, readiness explicit and allowed to fail fast. Merging the two is how you get health checks that mask outages and cause them in equal measure."
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read config.py around _required",
+      "ok": true,
+      "result": [
+        {
+          "file": "config.py",
+          "match": "def _required",
+          "after": 4
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "For what it is worth, nothing in configuration relates to health checking or logging, so there is no knob here to turn even if you wanted one — which supports doing the filtering at the layer in front."
+    },
+    {
+      "type": "tool",
+      "tool": "bash",
+      "command": "pytest -q",
+      "ok": true,
+      "result": "....                                                        [100%]\n4 passed in 0.11s"
+    },
+    {
+      "type": "assistant",
+      "text": "Green, and unchanged."
+    },
+    {
+      "type": "user",
+      "text": "one more: does anything else in the service log on every request?"
+    },
+    {
+      "type": "tool",
+      "tool": "read",
+      "command": "read app.py",
+      "ok": true,
+      "result": [
+        {
+          "file": "app.py",
+          "match": "def _serialise",
+          "before": 11,
+          "after": 15
+        }
+      ]
+    },
+    {
+      "type": "assistant",
+      "text": "No. The routes do no logging at all — the only log statement in the codebase is the retry warning in the database layer, which fires on failure rather than per request. So your entire application-level log volume is proportional to errors, which is exactly the shape you want."
+    },
+    {
+      "type": "assistant",
+      "text": "Right call. Summary: the health endpoint does no work and logs nothing; our only application log line is the query retry warning, which is worth keeping; the volume is access logging from the layer in front of us and should be filtered by path there. No code change is needed in this repository and I made none."
+    }
+  ]
+}
