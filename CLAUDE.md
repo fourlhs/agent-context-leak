@@ -13,8 +13,11 @@ hook (#16), the writeup (#17). T3's location rubric and its blind-grading harnes
 grades themselves wait on a run, which is the point — the rubric is registered before there is
 anything to grade.
 
-Next is **#14, the pilot gate** — the first thing here that spends money, and a hard stop until it
-reports a measured number.
+**#14, the pilot gate, is built and unrun.** `src/pilot.py` makes the calls, reads the measured
+usage back out of `runs/`, projects it to the full corpus and compares it to budget — all of it
+exercised against fake clients, none of it yet against a model. `python -m src.pilot` reports and
+spends nothing; `--run` is the only path that calls one. That run is the next thing to happen here
+and the first thing that costs money.
 
 Sections below describe intent; update them as code lands, and treat a stale status line here as a
 bug.
@@ -286,6 +289,7 @@ src/
   defender.py              distillation, C1/C2/C3      [calls a model]
   attacker.py              note-only adversary          [calls a model]
   control.py               guess-rate floor: strip a note, net T3   [runs the attacker]
+  pilot.py                 #14's gate: run, project, compare to budget   [--run calls models]
   aggregate.py             runs/ -> results/*.csv, exposure-conditioned — no API
   grading.py               T3 location: blind queue, unblinding, agreement — no API
   transcript_guard.py      refuses a staged unscrubbed transcript (#22) — no API
@@ -453,9 +457,39 @@ Order-of-magnitude estimate, both agents on Opus 5 at `medium` effort:
 and thinking volume — thinking is on by default on Opus 5 and billed as output, and it is the
 largest single term in the attacker cost. At default (`high`) effort the attacker roughly doubles.
 
-**Pilot gate, non-negotiable:** run 2 transcripts × 3 conditions × 5 samples (30 defender calls plus
-their attacker turns), read the *measured* usage out of `runs/`, multiply by 9, and compare to budget
-before launching the full run. Do not discover the overrun at 11pm.
+**Pilot gate, non-negotiable:** `python -m src.pilot --run` — 2 transcripts × 3 conditions × 5
+samples (30 defender calls plus their attacker turns and their control twins), read the *measured*
+usage out of `runs/`, project it to the full corpus, and compare to budget before launching the full
+run. Do not discover the overrun at 11pm. `python -m src.pilot` reports off `runs/` and calls
+nothing; `--run` is the only path that spends. The gate exits non-zero on an overrun, a note that
+failed, or a condition that never read the cache — a gate that exits 0 on an overrun is not a gate.
+
+**The projection scales by measured size, never by transcript count (#55).** "Multiply by 9" was
+wrong for the pair this gate pilots. The corpus is bimodal — sixteen transcripts at 6,052–7,021
+chars and the two pilots at 13,076 and 11,404 — so `24,480 × 9 = 220,320` against a corpus of
+`127,287` overstates the defender's input bill by **73%**. The damage is not the spend; it is a gate
+reporting an overrun that is not there, and the documented response to an overrun is the lever ladder
+below, where every rung costs something real. So `pilot.py` derives **two** multipliers from the run
+itself and prints both beside the number with what they were derived from: the defender re-reads a
+whole transcript on every call, so its uncached input, its cache reads and its cache writes scale by
+`corpus_chars / pilot_chars`; its output is one note, and every other stage reads one note, so those
+scale by transcript count. `INPUT_BASIS` is the whole rule and a stage missing from it raises rather
+than defaulting to either. The pilot's own share is read off the run records, never off a constant,
+so changing which transcripts are piloted moves the multiplier with it.
+
+**The reported cache ratio is the pilot pair's, and that pair is atypical.** The two current pilots
+are the corpus's longest transcripts and therefore its most cache-friendly, so they bias the
+cache-read ratio *optimistically* at the same time as a count multiplier biased the total
+*pessimistically* — two errors in opposite directions that the run records cannot separate
+afterwards. Arithmetic cannot correct this one; piloting nearer the corpus median can. The report
+says so, with candidates, whenever the pilot pair's mean length is off the corpus median, and stops
+saying it once it is not. Whether to switch is a decision about which transcripts to run, not
+something this projection can make.
+
+**Cache is reported per condition, never pooled.** Opus 5 caches nothing under 512 tokens and C3's
+scrubbed notes are the shortest artefacts in the pipeline, so a pooled ratio can read healthy while
+the attacker's C3 prefix never cached once — and a condition that never caches costs roughly double
+on every turn it runs.
 
 Levers if the pilot comes in hot, in order: drop attacker effort to `low` → control arm on a
 stratified subset → n from 5 to 3 (cheapest to do, worst for the error bars) → attacker to
