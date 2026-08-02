@@ -136,11 +136,6 @@ def store(tmp_path) -> RunStore:
     return RunStore(tmp_path)
 
 
-@pytest.fixture
-def canaries():
-    return load_canaries()
-
-
 def pilot_run(store, client=None, canaries=None, **overrides):
     client = client or FakeClient()
     kwargs = {**PROVENANCE, **overrides}
@@ -642,7 +637,24 @@ def test_the_report_asks_for_the_half_no_projection_covers(capsys):
 # -------------------------------------------------------------------- the cli
 
 
-def test_main_spends_nothing_without_run(tmp_path, capsys):
+@pytest.fixture
+def real_corpus(monkeypatch, fixture_root, canaries):
+    """Point `main`'s corpus load at the fixture this session built.
+
+    `main` reads the real 18 transcripts, and `load_all` binds `fixture/` as a
+    default argument, so the module attribute is what has to move. Never the real
+    `fixture/`: a test must not depend on a developer having run the generator
+    (conftest.py), and CI has not.
+    """
+    from src.transcript import TRANSCRIPTS, load_all
+
+    monkeypatch.setattr(
+        "src.transcript.load_all",
+        lambda *a, **k: load_all(TRANSCRIPTS, fixture_root=fixture_root, canaries=canaries),
+    )
+
+
+def test_main_spends_nothing_without_run(tmp_path, capsys, real_corpus):
     """Money is opt-in. `--run` is the only path that calls a model."""
     assert pilot.main([], tmp_path) == 1
 
