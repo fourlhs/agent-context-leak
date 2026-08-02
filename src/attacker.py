@@ -504,6 +504,10 @@ def main(argv: list[str]) -> int:
 
     import anthropic  # imported here so the deterministic tests never need the SDK
 
+    from src.env import load_env
+
+    load_env()
+
     note = sys.stdin.read()
     if not note.strip():
         print("no note on stdin", file=sys.stderr)
