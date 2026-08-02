@@ -253,7 +253,10 @@ def main(argv: list[str]) -> int:
 
     import anthropic  # imported here so the deterministic tests never need it
 
+    from src.env import load_env
     from src.transcript import load_all
+
+    load_env()
 
     transcripts = {t.id: t for t in load_all()}
     if transcript_id not in transcripts:

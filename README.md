@@ -126,6 +126,12 @@ uv run python -m src.defender --pilot      # 2 transcripts, all 3 conditions
 uv run python -m src.attacker --pilot      # note-only adversary + control arm
 ```
 
+The key goes in `.env` — `cp .env.example .env` and fill it in. That file is gitignored and has to
+stay that way: a key reaching a commit on a public repo is this project's own subject matter taking
+the shortest available route. A real environment variable wins over the file, so
+`ANTHROPIC_API_KEY=... uv run ...` and CI secrets work without editing anything. Only the
+model-calling stages load it; the deterministic core neither needs a key nor looks for one.
+
 Fixture generation and T1/T2 scoring are deterministic and run entirely offline. Only the defender
 and attacker call a model. Every model call logs its token usage to `runs/`, so cost is measured
 rather than estimated.
