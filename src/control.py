@@ -78,7 +78,10 @@ single unit contains it. Every stripped note is then re-scored and the strip
 **raises** unless T1 and T2 are clean for every canary.
 
 The label is stripped too, though it is neither T1 nor T2: a control note holding
-`CANARY-7F3A-ENV_SECRET` hands over an identifier the fixture planted.
+`CANARY-7F3A-ENV_SECRET` hands over an identifier the fixture planted. Spelled as
+the scorer spells it and no wider — `canary-7f3a-env_secret` is a string `score`
+certifies clean, so removing it would strip the control note past the observed
+one it is subtracted from (#53).
 
 What is deliberately **not** a needle: the manifest's `target_file`, and generic
 repository nouns in general. `.env` is where the floor lives — removing every
@@ -237,15 +240,19 @@ def _view(units: list[str]) -> tuple[str, list[tuple[int, int] | None]]:
     return " ".join(parts), spans
 
 
-def _raw(units: list[str]) -> tuple[str, list[tuple[int, int] | None]]:
+def _raw(units: list[str]) -> tuple[str, list[tuple[int, int]]]:
     """The note as the defender wrote it, and where each unit sits in it.
 
     `score` compares its literals against the raw note — `value in note_text`,
-    case and all — so that is the view they have to be searched in. The tiling is
-    lossless, so a literal spanning two units is found here exactly as a marker
-    spanning two is found in `_view`.
+    case and all — so that is the view they have to be searched in.
+
+    Built the same way as `_view` rather than as a lookup of the one unit a
+    literal must sit in. No manifest literal can currently span two units — none
+    contains whitespace, and every unit but the last ends in it — so that is a
+    trade, not a case being handled: both views are consumed by the same span
+    arithmetic, and a whitespace-bearing literal from #3 would need nothing here.
     """
-    spans: list[tuple[int, int] | None] = []
+    spans: list[tuple[int, int]] = []
     cursor = 0
     for unit in units:
         spans.append((cursor, cursor + len(unit)))
@@ -265,11 +272,11 @@ def _hits(units: list[str], needles: set[tuple[str, bool]]) -> list[bool]:
     A needle inside a heading is left standing for the re-score gate to fail on,
     because a section *titled* after the secret is not a note we can control for.
     """
-    views = {True: _view(units), False: _raw(units)}
+    normalised, raw = _view(units), _raw(units)
     hits = [False] * len(units)
-    for needle, marker in needles:
-        text, spans = views[marker]
-        pattern = marker_pattern(needle) if marker else re.escape(needle)
+    for needle, is_marker in needles:
+        text, spans = normalised if is_marker else raw
+        pattern = marker_pattern(needle) if is_marker else re.escape(needle)
         for match in re.finditer(f"(?={pattern})", text):
             start, end = match.start(), match.start() + len(needle)
             for i, span in enumerate(spans):
@@ -300,7 +307,7 @@ def _orphans(units: list[str], hits: list[bool]) -> list[bool]:
     return hits
 
 
-def _drop(note: str, needles: set[str]) -> str:
+def _drop(note: str, needles: set[tuple[str, bool]]) -> str:
     units = _units(note)
     kept: list[str] = []
     for i, (unit, hit) in enumerate(zip(units, _orphans(units, _hits(units, needles)))):

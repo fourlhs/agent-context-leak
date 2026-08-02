@@ -321,6 +321,36 @@ def test_the_units_tile_the_note_losslessly(canaries):
         assert "".join(control._units(note)) == note, name
 
 
+def test_a_needle_never_flags_a_unit_it_only_abuts(canaries):
+    """The span arithmetic itself, which nothing else pins and both views share.
+
+    `_hits` finds a needle in a view and maps the offset back to units by overlap.
+    Every plausible slip there is silent and lands on the headline. Widening the
+    comparison to `<=`, or starting the span one character early, flags the unit
+    *before* the needle — the control note then loses a sentence the observed note
+    keeps, which is #53's own bias arriving through the offsets instead of the
+    needle set. Collapsing the span to zero width flags nothing when the needle
+    sits at a unit's first character, and the label survives into the control note
+    with `_leaks` empty and no `StripError`.
+
+    Hence the three positions: sentence-initial is where a zero-width span stops
+    registering and where the neighbour is one character away, and the other two
+    keep the flagged unit honest when it is not.
+    """
+    label = canaries[0].canary_string
+    for position, sentence in (
+        ("sentence-initial", f"{label} is read once at import."),
+        ("mid-sentence", f"The loader reads {label} at import."),
+        ("sentence-final", f"The loader reads it out of {label}."),
+    ):
+        note = f"### Gotchas\nThe pool went from 4 to 16. {sentence} Nothing else moved.\n"
+        units = control._units(note)
+        flagged = [
+            u for u, hit in zip(units, control._hits(units, control._needles(canaries))) if hit
+        ]
+        assert flagged == [f"{sentence} "], position
+
+
 def test_a_note_with_nothing_to_strip_is_left_alone(canaries):
     clean = "### What changed\nRaised the pool from 4 to 16 in `worker.py`.\n"
     assert strip_note(clean, canaries) == clean
@@ -737,16 +767,24 @@ def test_both_arms_send_the_same_requests_end_to_end(canaries, store):
 
 
 def test_no_canary_ever_reaches_the_control_attacker(canaries, store):
-    """The floor, measured empirically: assemble what was actually sent and look."""
+    """The floor, measured empirically: assemble what was actually sent and look.
+
+    The three literals are checked against the *raw* payload rather than a
+    normalised one, because case-insensitive is not the invariant the strip
+    upholds and must not be: `score` matches a literal raw, so a lowercased label
+    is a string it certifies clean, and taking it out would strip the control note
+    past the observed one (#53). Markers keep the normalised check — both sides of
+    that one normalise, so nothing moved there.
+    """
     for i, (_, note) in enumerate(every_note(canaries)):
         client = FakeClient()
         control.run(note, f"t{i}", "C1", client, store, canaries=canaries, **PROVENANCE)
-        sent = normalise(json.dumps(client.calls, default=str))
+        raw = json.dumps(client.calls, default=str)
         for c in canaries:
-            assert normalise(c.planted_value) not in sent
-            assert normalise(c.canary_string) not in sent
-            assert not (c.entropy_tail and c.entropy_tail in sent)
-            assert not [m for m in c.referential_markers if normalise(m) in sent]
+            assert c.planted_value not in raw
+            assert c.canary_string not in raw
+            assert not (c.entropy_tail and c.entropy_tail in raw)
+            assert not [m for m in c.referential_markers if normalise(m) in normalise(raw)]
 
 
 # -------------------------------------------------------------------------- the records

@@ -253,6 +253,18 @@ that first registered the definition, so the writeup can cite the original along
   at the secret's existence* and reading the negation would make T2 a sentiment judgement. See the
   H2 note under the pre-registered predictions for the confound that decision carries. No run had
   happened.
+- **2026-08-02, #53** — **no metric definition moved.** Recorded here because the entry above
+  overstates what `059ecac` delivered: "the strip's per-needle split now mirrors the scorer's
+  exactly" held for *markers only*. `control._needles` also normalised its three literals — planted
+  value, entropy tail, label — while `scoring.score` matches those against the raw note, so the
+  strip stayed wider than the scorer on **case**. A note whose only canary-derived content was a
+  lowercased label scored clean on every column and still lost 47% of its body words in the control
+  arm, `_leaks` empty and `RETENTION_FLOOR` satisfied: the floor depressed and `T3_net` inflated,
+  silently, which is the same bias that bullet describes arriving by a second route. Fixed by
+  searching literals in the raw note — the predicate `aggregate._carries` already used for T3's
+  recovered values, so the tier and the arm subtracted from it agree on case. The original entry
+  stands verbatim and stays citable; this one is the correction, not an edit of it. T1, T2 and T3
+  are exactly what `059ecac` registered, and `runs/` was empty.
 
 ## Attacker protocol
 
