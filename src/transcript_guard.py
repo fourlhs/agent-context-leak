@@ -1,9 +1,11 @@
-"""Refuse a commit that stages an unscrubbed transcript.
+"""Refuse a commit that stages a real value in a file this repo publishes.
 
-`transcripts/` is committed on purpose — the corpus is part of the benchmark and
-has to be reproducible — so an unscrubbed real session is one `git add -A` away
-from a permanent public commit. Hard rule 1 says any real transcript is scrubbed
-before it comes near this repo; nothing enforced it. This does.
+Two directories are in scope, for the same reason. Both are committed on purpose
+— the corpus is part of the benchmark and has to be reproducible, the manifest is
+the single source of truth — so an unscrubbed real session pasted into one, or a
+real key typed into the other while authoring a canary, is one `git add -A` away
+from a permanent public commit. Hard rule 1 says everything here is synthetic;
+nothing enforced it. This does.
 
 It reads the **staged** bytes, which is what the commit would actually contain: a
 file staged clean and then dirtied passes, and one staged dirty and then cleaned
@@ -30,6 +32,34 @@ under test would catch has it backwards. Hence a vendor prefix with no length
 gate, a blob rule tighter than the scrubber's, and a second pass over `/`-joined
 runs.
 
+**Where the line is on the manifest (#51).** `canaries/manifest.yaml` is
+*supposed* to hold secret-shaped strings — that is what a canary is — so a guard
+over it needs a rule for which ones are legitimate, and a guard that trusted the
+whole file would be a decoration. The line is `redact()` plus
+`manifest.validate()`: a string passes iff the manifest declares it as a
+`canary_string`, an `entropy_tail`, or the `planted_value` those two compose,
+**and** `validate()` accepted the declaration — which forces
+`CANARY-<4 hex>-<CATEGORY>` on the label and 8+ lowercase hex on the tail. So a
+real key pasted into a canary field cannot launder itself into the whitelist:
+`validate()` refuses the declaration, the manifest stops loading, and nothing
+commits. Everything outside those three fields — contexts, markers, target
+paths, and **comments** — is read exactly as a transcript is.
+
+Comments are not exempt, deliberately. Exempting them is the cheap way to quiet
+an illustrative path in the manifest header, and it buys that quiet by going
+blind to a real secret pasted into a comment, which is committed and public just
+the same. The header illustrates the path format with a declared canary instead.
+
+Two limits on that line, stated rather than papered over. A real random hex run
+typed into `entropy_tail` is indistinguishable from a synthetic one and would be
+whitelisted — the manifest is its own whitelist and no rule escapes that. And the
+whitelist is loaded from the manifest on **disk** while the bytes checked come
+from the index, so staging the manifest and then editing it compares one against
+the other. The common divergence fails closed: a canary declared only in the
+index reads as undeclared and blocks. The open direction can only hide a canary
+string, which is synthetic by construction. Left standing rather than fixed, and
+carried to #59 with the scope question.
+
 Deliberately noisy rather than clever. A false positive costs one
 `CANARY_GUARD_OVERRIDE=1`; a false negative is permanent and public.
 
@@ -53,8 +83,10 @@ from src.manifest import Canary
 from src.manifest import load as load_canaries
 
 # Which staged paths are checked, and the one deliberate way past a finding.
-# `git commit --no-verify` is too invisible to count as a decision.
-SCOPE = "transcripts/"
+# `git commit --no-verify` is too invisible to count as a decision. An inclusion
+# list protects only what someone remembered to add, which is why #59 asks
+# whether the default should be inverted.
+SCOPE = ("canaries/", "transcripts/")
 OVERRIDE = "CANARY_GUARD_OVERRIDE"
 
 # What every declared canary collapses to before a rule sees the text. 15 chars
@@ -344,17 +376,20 @@ def _git(*args: str) -> str:
     return done.stdout
 
 
-def staged(scope: str = SCOPE) -> tuple[str, ...]:
+def staged(scope: str | tuple[str, ...] = SCOPE) -> tuple[str, ...]:
     """Paths added, copied, modified or renamed in the index — not the working tree.
 
     `R` is in the filter because a rename is how content that was never checked
-    here arrives here.
+    here arrives here. `str.startswith` takes the tuple as-is, so a scope of one
+    directory and a scope of several are the same code path.
     """
     listing = _git("diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
     return tuple(p for p in listing.split("\0") if p.startswith(scope))
 
 
-def check_staged(canaries: Iterable[Canary], scope: str = SCOPE) -> tuple[Finding, ...]:
+def check_staged(
+    canaries: Iterable[Canary], scope: str | tuple[str, ...] = SCOPE
+) -> tuple[Finding, ...]:
     """`git show :path` is the staged blob; reading the file would miss the point."""
     canaries = tuple(canaries)
     return tuple(
@@ -376,9 +411,10 @@ def verdict(findings: tuple[Finding, ...], *, overridden: bool) -> str:
         f"transcript-guard: {where} -- commit blocked.\n"
         f"Scrub the file. If every finding above is a false positive, re-run the commit "
         f"with {OVERRIDE}=1 in the environment.\n"
-        f"Hard rule 1: any real transcript is scrubbed before it comes near this repo. "
-        f"Hard rule 3: this repo is public and what lands here is permanent, so an "
-        f"unscrubbed commit cannot be taken back."
+        f"Hard rule 1: everything committed here is synthetic -- a real transcript is "
+        f"scrubbed before it comes near this repo, and a canary is invented rather than "
+        f"pasted. Hard rule 3: this repo is public and what lands here is permanent, so "
+        f"an unscrubbed commit cannot be taken back."
     )
 
 

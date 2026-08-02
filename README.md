@@ -76,18 +76,29 @@ the only source of truth.
 
 ### The corpus guard
 
-`transcripts/` **is** committed — the corpus is part of the benchmark — so an unscrubbed real session
-would be one `git add -A` away from a permanent public commit. `src/transcript_guard.py` reads the
-**staged** bytes of anything under `transcripts/` and reports an undeclared high-entropy token, a
-credential behind a secret-named key, a vendor key prefix, a home directory that is not one of the
-synthetic ones, or a hostname outside the reserved `.example` / `.internal` TLDs. The manifest
-supplies the whitelist, so the declared canaries pass and everything else does not. Every rule is
-written for JSON first, because that is the only format the corpus has.
+`transcripts/` and `canaries/` **are** committed — the corpus is part of the benchmark, the manifest
+is the source of truth — so an unscrubbed real session pasted into one, or a real key typed into the
+other while authoring a canary, would be one `git add -A` away from a permanent public commit.
+`src/transcript_guard.py` reads the **staged** bytes of anything under those two directories and
+reports an undeclared high-entropy token, a credential behind a secret-named key, a vendor key
+prefix, a home directory that is not one of the synthetic ones, or a hostname outside the reserved
+`.example` / `.internal` TLDs. The manifest supplies the whitelist, so the declared canaries pass and
+everything else does not. Every rule is written for JSON first, because that is the only format the
+corpus has.
+
+The manifest is the interesting case, because it is *meant* to hold secret-shaped strings. The line
+is the whitelist plus `src/manifest.py`'s validation: a string passes only if the manifest declares
+it as a `canary_string`, an `entropy_tail`, or the planted value those two compose, **and** the
+declaration is canary-shaped — so a real key pasted into a canary field cannot legitimise itself, and
+everything else in the file, comments included, is read exactly as a transcript is. Comments are not
+exempt on purpose: skipping them would be the cheap way to quiet an illustrative path in the header,
+and it would go blind to the likeliest way a real value arrives. The header teaches the path format
+with a declared canary instead.
 
 **The layer that needs no opt-in is the test suite**: `uv run pytest` runs the guard over every file
-under `transcripts/`, recursively, so an unscrubbed transcript turns the suite red on any machine,
-hook configured or not. The hook is fast local feedback on top of that — it tells you before the
-commit rather than after.
+in scope, recursively, so an unscrubbed transcript or a real value in the manifest turns the suite
+red on any machine, hook configured or not. The hook is fast local feedback on top of that — it tells
+you before the commit rather than after.
 
 ```sh
 git config core.hooksPath .githooks          # enable the pre-commit hook, once per clone
@@ -148,7 +159,7 @@ src/defender.py            distillation, C1/C2/C3
 src/attacker.py            note-only adversary
 src/aggregate.py           exposure-conditioned rates + T3_net (deterministic)
 src/grading.py             T3 location grading: blind queue, agreement (deterministic)
-src/transcript_guard.py    staged-transcript guard (deterministic)
+src/transcript_guard.py    staged-value guard over transcripts/ and canaries/ (deterministic)
 grading/rubric.md          the T3 location rubric, registered before any grading
 .githooks/pre-commit       runs the guard before every commit
 transcripts/               session transcripts

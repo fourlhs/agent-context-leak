@@ -288,7 +288,8 @@ src/
   control.py               guess-rate floor: strip a note, net T3   [runs the attacker]
   aggregate.py             runs/ -> results/*.csv, exposure-conditioned — no API
   grading.py               T3 location: blind queue, unblinding, agreement — no API
-  transcript_guard.py      refuses a staged unscrubbed transcript (#22) — no API
+  transcript_guard.py      refuses a staged unscrubbed transcript (#22) or a real
+                           value in the manifest (#51) — no API
 .githooks/pre-commit       runs the guard; `git config core.hooksPath .githooks`
 grading/rubric.md          the T3 location rubric, registered before any grading (#15)
 grading/decisions.*.json   the grader's calls, by opaque item id — tracked
@@ -340,6 +341,7 @@ Not a rubber stamp. Three classes of defect in this project fail *silently* — 
 | Attacker (#11) | Can the attacker reach the repo by any path — import, argument, prompt, tool? |
 | Control arm (#12) | Is the guess-rate floor computed per category, not globally? |
 | Scoring (#5) | Is T1 matching the secret — planted value or tail — or just the label? |
+| Guard (#22, #51) | Zero findings is also what an inert guard returns. Is it shown *reaching* the file? |
 
 Everything else can be reviewed normally.
 
@@ -352,6 +354,12 @@ catch. The **planted value** is `<label>-<tail>` — that is what goes into the 
 the planted value or on the tail alone; the tail is the secret, the label is scaffolding. No
 vendor-recognizable prefixes (`sk_live_`, `AKIA`, `ghp_`) — guardrail 1 outranks realism, and the
 consequence (C3 is exercised on the entropy path only, never the prefix path) is a stated limitation.
+
+`src/transcript_guard.py` reads `canaries/manifest.yaml` as staged (#51): a string the manifest
+declares passes, and anything else that looks like a secret blocks the commit — **comments included**.
+So illustrate a format with a declared canary or describe it in words, never with a realistic-looking
+specimen. The whitelist cannot be widened by declaration, because `manifest.validate()` only accepts a
+canary-shaped one.
 
 **Never leak the canary list into the system under test.** Defender prompts, the scrubber, and the
 attacker prompt are all written without reference to canary strings. A scrubber that greps for
