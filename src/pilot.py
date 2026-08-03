@@ -442,7 +442,15 @@ def _elasticity(points: Mapping[int, Sequence[float]]) -> tuple[float, float] | 
         return None
     xbar = sum(xs) / len(xs)
     sxx = sum((x - xbar) ** 2 for x in xs)
-    if sxx <= 0:  # no lever arm: every piloted transcript is the same length
+    # No lever arm at all: every piloted transcript the same length. This is the
+    # last line before a division by `sxx`, and it is *not* the check that keeps
+    # the fit honest — it fires only on exactly equal log-lengths, while the
+    # hazard that bites is a lever arm too short relative to the scatter (two
+    # transcripts 53 chars apart fit e = +6.25 +/- 6.81, clamp silently, and
+    # report `measured`). `UNINFORMATIVE_SE` flags that, and
+    # `test_the_pilot_pair_spans_the_corpus` is what keeps it latent: widen
+    # `PILOT` off the corpus's endpoints and it goes live.
+    if sxx <= 0:
         return None
     slope = sum((x - xbar) * y for x, y in zip(xs, ys)) / sxx
     se = math.sqrt(sum(((x - xbar) / sxx) ** 2 * v for x, v in zip(xs, relative_variance)))

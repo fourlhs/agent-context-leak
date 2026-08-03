@@ -24,6 +24,7 @@ Five things here fail silently rather than loudly, and each is pinned by name:
 """
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -779,6 +780,81 @@ def test_the_elasticity_is_clamped_to_a_plausible_range():
 
     assert factors[THINKING].value == pytest.approx(factors[CALLS].value)  # clamped at e=0
     assert "-2.00" in factors[THINKING].derivation  # the raw fit is still reported
+
+
+# --------------------------------------------------------- the fit's arithmetic
+#
+# The verdict rests on these four functions and, until #61's mutation battery,
+# every one of them could be broken in a way the rest of the suite waved through.
+# The tests below are deliberately unit-level and hand-computed: a projection
+# assertion checks that the arithmetic agrees with itself, which is exactly what
+# a wrong constant also does.
+
+
+def test_the_standard_error_is_propagated_on_the_log_scale():
+    """The delta method — the one line of the fit that is easiest to lose.
+
+    `ys` are `ln(mean)`, so each point's weight has to be the variance *of the
+    log*, `(sem/mean)**2`, not `sem**2`. Drop the division and the fit still
+    runs, still prints a `+/-`, and reports it in tokens rather than in units of
+    an exponent: on the real pilot that is 4,339x too wide. It no longer gates
+    the verdict (the bound does), but it is printed beside the fit and it is the
+    number #17 quotes for `e`.
+
+    Hand-computed rather than restated from the code. Two points a factor of two
+    apart, three samples each, both with sd/mean = 0.1:
+
+        mean 100, sd 10  -> sem^2 / mean^2 = (100/3) / 100^2 = 1/300
+        mean 200, sd 20  -> sem^2 / mean^2 = (400/3) / 200^2 = 1/300
+
+    With two points `(x - xbar) / sxx` is `1 / (x2 - x1)` at both, so
+    `se = sqrt(v1 + v2) / |ln L2 - ln L1| = sqrt(1/150) / ln 2`.
+    """
+    slope, se = pilot._elasticity({1000: [90, 100, 110], 2000: [180, 200, 220]})
+
+    assert slope == pytest.approx(1.0)
+    assert se == pytest.approx(math.sqrt(1 / 150) / math.log(2))
+    assert se == pytest.approx(0.1178, abs=5e-5)  # and the magnitude, in the open
+
+
+def test_the_standard_error_of_a_mean_uses_the_sample_variance():
+    """`n - 1`, not `n`. One line, and it feeds every `+/-` the gate prints."""
+    assert pilot._mean_sem([90, 100, 110]) == (100, pytest.approx(math.sqrt(100 / 3)))
+    assert pilot._mean_sem([90, 100, 110])[1] == pytest.approx(5.7735, abs=5e-5)
+    assert pilot._mean_sem([7]) == (7, 0.0)  # one sample has no spread to report
+
+
+def test_a_zero_measurement_falls_back_instead_of_raising():
+    """`ys` are `ln(mean)`, so a mean of zero is `math domain error` — a traceback
+    where the intended behaviour is a flat count labelled `[ASSUMED]`. A defender
+    record carrying zero output tokens is a live possibility, and the gate exists
+    to report a number rather than to die holding one."""
+    silent = (
+        _defender("a", 0, 0, 50, write=300),
+        _defender("a", 1, 0, 50, read=300),
+        _defender("b", 0, 200, 100, write=500),
+        _defender("b", 1, 200, 100, read=500),
+    )
+    factors = project(silent, SIZES).factors
+
+    assert not factors[THINKING].measured
+    assert factors[THINKING].value == factors[CALLS].value
+    assert factors[NOTES].measured  # and only the fit that saw the zero degrades
+
+
+def test_a_pilot_with_no_lever_arm_returns_none_rather_than_dividing_by_zero():
+    """`sxx <= 0` is the guard between the fit and a `ZeroDivisionError`.
+
+    It fires only on *exactly* equal log-lengths, which through `project` means
+    two lengths so large their logarithms collapse to one float — `points` is
+    keyed by length, so anything coarser has already merged into a single point.
+    The hazard that actually bites is a lever arm too short relative to the
+    scatter, and `UNINFORMATIVE_SE` is what catches that.
+    """
+    collapsed = {2**60: [100.0, 100.0], 2**60 + 1: [200.0, 200.0]}
+    assert math.log(2**60) == math.log(2**60 + 1)  # not vacuous: one x, twice
+
+    assert pilot._elasticity(collapsed) is None
 
 
 # ------------------------------------------------------------------ the cache
