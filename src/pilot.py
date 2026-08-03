@@ -2,64 +2,104 @@
 
 Two transcripts x three conditions x five samples, plus the attacker turns over
 every note it writes and the control arm beside them. The *measured* usage then
-comes back out of `runs/`, is scaled to the full corpus, and is compared against
+comes back out of `runs/`, gets scaled to the full corpus, and is compared against
 budget. It is a hard stop, not a task: nothing launches the full run until this
 reports a number.
 
-**The multiplier is derived, never named.** #14 originally read "multiply by 9" —
-one transcript count over another — and #55 found that wrong for the pair it was
-written against. The corpus is bimodal, both pilots sit in the long mode, and
-`24,480 x 9 = 220,320` chars against a corpus of `127,287` overstates the
-defender's input bill by 73%. The damage is not the spend; it is that the gate
-reports an overrun that is not there, and the documented response to an overrun
-is a ladder of levers that each cost something real — n from 5 to 3, the control
-arm down to a stratified subset, the attacker down to `claude-sonnet-5`, which
-costs the symmetry argument and turns T3 back into a lower bound. So the
-projection scales by measured *size*, reads the pilot's own share off the run
-records rather than off a constant here, and prints both multipliers with their
-derivation beside the number they produced.
+## What actually costs money, and what this therefore measures
 
-**Two multipliers, because two things scale differently.** The defender re-reads
-a whole transcript on every call, so its uncached input, its cache reads and its
-cache writes all follow the corpus's *characters*. Its output is one note, and
-every other stage reads one note, so those follow the corpus's *count*. Applying
-the count to the defender's input is #55; applying characters to the attacker
-would understate it by the same arithmetic pointed the other way. `INPUT_BASIS`
-is the whole rule, and a stage missing from it raises rather than defaulting to
-either — a stage silently projected on the wrong basis is exactly the class of
-defect this gate exists to catch.
+The defender's whole input side is bounded above by ~$3.22 — 270 calls over a
+~2,388-token prompt at full price — and about $0.57 once #10's cached prefix is
+hitting. **Output tokens are the bill.** Thinking is on by default on Opus 5 and
+bills at $25/MTok, so defender output is ~97% of the defender line, and the
+attacker and control arms are output-dominated too. A projection that gets the
+input side beautifully right and hand-waves the output term has aimed its
+precision at about 1% of the budget.
 
-**What this gate cannot tell you.** Stated here, and printed with the number,
-because an unqualified projection is how the last three defects in this project
-shipped — as plausible wrong numbers rather than crashes.
+So the term that decides the verdict is **how per-call output responds to
+transcript length**, and this module measures it rather than assuming it. Let `e`
+be the elasticity of a quantity to transcript length. The honest multiplier is
 
-- It corrects for the pilot pair's *size*, not for its *content*. Thinking volume
-  is the largest single term in the attacker's bill and it keys on how much a
-  note gives an attacker to chase, which no character count predicts.
-- The cache-read ratio is the pilot pair's own. On the current pair those are the
-  two longest transcripts in the corpus and therefore the most cache-friendly, so
-  the ratio is optimistic at the same time as a count-based multiplier would have
-  been pessimistic — two errors in opposite directions that cannot be separated
-  afterwards from the run records. Arithmetic cannot correct it; piloting nearer
-  the corpus median can, and that is a choice about which transcripts to run.
-  `_bias_note` says so in the report whenever the pilot's mean length is off the
-  corpus's, so it stops being said once it stops being true.
-- Attacker turn count varies — a note that fails on turn 2 billed two turns — so
-  the projection carries whatever failure rate 30 notes happened to show.
-- These are list prices. `runs_report` says so; the authoritative figure is the
-  bill.
-- It says nothing about whether the notes are any good. #14 also asks for a human
-  read of three of them, and if C1's notes are garbage everything downstream
-  measures nothing. That part is not automatable and the report asks for it.
+    F(e) = sum(L_i^e over the corpus) / sum(L_j^e over the pilot)
+
+which is less a new idea than the general form of the two multipliers this gate
+used to hardcode: **F(0) is the transcript count ratio and F(1) is the character
+ratio.** Assuming a flat count is asserting `e = 0` without saying so. `e` is
+fitted by regressing log mean output on log transcript length across the pilot
+transcripts, which is why `PILOT` **spans** the corpus's length range instead of
+sitting at one end of it: the fit needs a lever arm, and the pilot already
+collects every number it needs.
+
+Two elasticities are fitted, because two different things drive spend. The
+defender's output follows the transcript it is reading (`thinking`). The attacker
+and the control arm never see a transcript — they read a *note* — so their spend
+follows note length, measured directly off the stored notes (`notes`) and far
+better conditioned than a token count.
+
+`e` is clamped to `[0, 1]`. Below zero would mean longer transcripts produce less
+output, above one that they produce superlinearly more; either is a finding in
+its own right rather than an input, and the clamp keeps the factor between the
+two bases this gate would otherwise have had to choose between by hand.
+
+## The input side, which is small but free to get right
+
+`input_tokens` on a defender call is the *post-breakpoint* remainder — C2's
+instruction and per-call structure — so it is a per-call constant and scales by
+count, not by characters. The cached terms are neither: #10 deliberately caches
+the note-format spec *together* with the transcript, so one prefix is `S + k*L`,
+a count-scaled constant plus a chars-scaled variable that no single basis can
+express. Two pilot transcripts of different lengths are two equations in two
+unknowns, so `S` and `k` are **solved from the measured cache writes** and the
+prefix factor follows exactly. That is the direct answer to "is there a term that
+follows neither basis": yes, this one, and it is a second reason the pilot pair
+must differ in length.
+
+## What this gate cannot tell you
+
+Printed with the number, because an unqualified projection is how the last three
+defects in this project shipped — as plausible wrong numbers rather than crashes.
+
+- **Length is confounded with content.** Two transcripts fit each elasticity, so
+  anything that moves output and happens to correlate with length is inside `e`.
+  The fit reports a standard error and the verdict is taken at the expensive end
+  of it, but n=2 cannot separate the two and no arithmetic will.
+- **A fallback silently becomes an assumption.** If a fit fails — equal lengths,
+  a degenerate solve — the factor falls back to a flat count, which is `e = 0`
+  asserted rather than measured. `Factor.measured` records which, the report says
+  so, and the gate exits non-zero rather than letting it pass unread.
+- **The control arm is projected on the observed note's elasticity.** A stripped
+  note is shorter than the note it came from, most so where `RETENTION_FLOOR` is
+  nearly tripped, and that gap is not modelled.
+- **Refusals cost samples the projection does not replace.** A note the defender
+  refuses is one fewer measurement, and the full run may refuse at another rate.
+- **Attacker turn count varies** — a note that fails on turn 2 billed two turns —
+  so the projection carries whatever failure rate 30 notes happened to show.
+- **The cache regime is the 5-minute default**, which is the cheaper of the two
+  here: one 1.25x write plus fourteen 0.1x reads is 2.65x base, against 3.4x for
+  the 1-hour TTL. The residual risk is a *resumed* run, or a long backoff, pushing
+  a gap past the window — every prefix re-written at 1.25x, which this projection
+  does not model because the pilot ran inside it.
+- **A mid-run settings change lands low.** `runs.exists()` keys on four
+  coordinates, so relaunching after pulling an escalation lever keeps every record
+  written under the old setting. `provenance_warnings` is folded into the gate's
+  own problems for exactly that reason.
+- **These are list prices.** `runs_report` says so; the bill is authoritative.
+- **It says nothing about whether the notes are any good.** #14 also asks for a
+  human read of three of them, and if C1's notes are garbage everything
+  downstream measures nothing. That is not automatable and the report asks for it.
 
 **Money is opt-in.** `python -m src.pilot` reports off `runs/` and calls nothing;
 only `--run` spends. Resume is the store's: every stage skips what `runs/` already
-holds, so a crash at call 23 of 30 re-pays for none of the first 22.
+holds, so a crash at call 23 of 30 re-pays for none of the first 22. A note the
+defender refuses, the attacker fails on, or the control arm cannot strip is
+collected and reported rather than raised — a gate that aborts on note 4 of 30 has
+spent the money and reported nothing.
 """
 
+import math
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,31 +107,57 @@ from src import attacker, control, defender, runs_report
 from src.attacker import AttackFailure
 from src.control import StripError
 from src.runs import RUNS, RunRecord, RunStore, Usage
-from src.runs_report import StageTotals, price, summarise
+from src.runs_report import StageTotals, price, provenance_warnings, summarise
 
-# The pair #14 pilots. Not a projection input — `project` reads which transcripts
-# actually ran off the records, so changing this moves the multiplier with it.
-PILOT = ("refund_500_debug", "replica_lag_investigation")
+# The pair #14 pilots: the corpus's **shortest and longest** transcripts. Not a
+# projection input — `project` reads which transcripts actually ran off the
+# records — but the span is what gives the elasticity fits a lever arm, and what
+# makes the prefix model solvable at all. A pair of similar length degrades both
+# to their fallbacks, loudly.
+PILOT = ("internal_docs_link_rot", "refund_500_debug")
 
 # CLAUDE.md, Budget: ~$18 defender + ~$36 attacker and control.
 BUDGET = 55.00
 
-# What each term of the bill is proportional to — see the module docstring.
-CHARS, CALLS = "chars", "calls"
-INPUT_BASIS = {defender.STAGE: CHARS, attacker.STAGE: CALLS, control.STAGE: CALLS}
+# The four billed quantities, in `Usage`'s own field names.
+TERMS = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+)
 
-# Opus 5 caches nothing shorter than this, so a condition can read zero while the
-# pooled ratio looks healthy (CLAUDE.md, prompt caching).
-MIN_CACHEABLE_TOKENS = 512
+CALLS = "calls"  # a per-call constant: F(0), the transcript count ratio
+CHARS = "chars"  # strictly proportional to transcript length: F(1)
+PREFIX = "prefix"  # #10's cached prefix, S + k*L, solved from the pilot
+THINKING = "thinking"  # defender output: elasticity to transcript length, fitted
+NOTES = "notes"  # attacker and control: elasticity of note length, fitted
 
-# Below this the pilot's mean transcript length is close enough to the corpus's
-# that the cache-friendliness bias is not worth a paragraph.
-BIAS_TOLERANCE = 0.10
+# Which factor scales which term of which stage. The whole rule; a stage missing
+# from it raises rather than defaulting to a basis nobody chose.
+BASES = {
+    defender.STAGE: {
+        "input_tokens": CALLS,
+        "cache_read_input_tokens": PREFIX,
+        "cache_creation_input_tokens": PREFIX,
+        "output_tokens": THINKING,
+    },
+    attacker.STAGE: dict.fromkeys(TERMS, NOTES),
+    control.STAGE: dict.fromkeys(TERMS, NOTES),
+}
+
+# Below zero means longer transcripts produce less; above one, superlinearly more.
+E_RANGE = (0.0, 1.0)
+
+# #10's layout predicts 14 reads per write for the defender (93%) and 2 per 3
+# turns for the attacker (67%). A third of the smaller only fires when caching is
+# substantially broken rather than merely imperfect.
+CACHE_FLOOR = 0.33
 
 
 @dataclass(frozen=True)
 class Failure:
-    """A note the pilot could not attack or strip. Collected, not raised."""
+    """A note the pilot could not distil, attack or strip. Collected, not raised."""
 
     stage: str
     condition: str
@@ -104,52 +170,65 @@ class Failure:
 
 
 @dataclass(frozen=True)
-class Projection:
-    """One stage's measured spend, and the same stage scaled to the full corpus.
+class Factor:
+    """One multiplier and — inseparably — where it came from.
 
-    `input_basis` travels with the factors because it is the thing #55 got wrong:
-    a projection whose output does not say which multiplier it used, and what
-    that multiplier was derived from, is unauditable after the fact.
+    `measured` is False when a fit or a solve failed and the factor degraded to an
+    assumption. #55 was a number that looked right and was 73% off with nothing in
+    the output saying which multiplier produced it; a factor that cannot say how
+    it was derived is the same defect wearing a different hat.
     """
+
+    name: str
+    value: float
+    derivation: str
+    measured: bool = True
+
+
+@dataclass(frozen=True)
+class Projection:
+    """One stage's measured spend, and the same stage scaled to the full corpus."""
 
     stage: str
     model: str
     measured: StageTotals
-    input_basis: str
-    input_factor: float
-    output_factor: float
+    bases: dict[str, str]
     projected: Usage
     cost: float
 
 
 @dataclass(frozen=True)
 class Extrapolation:
-    """Every stage's projection, plus the derivation both multipliers came from."""
+    """Every stage's projection, the factors behind it, and the fits' own spread."""
 
     piloted: tuple[str, ...]
     corpus: tuple[str, ...]
     pilot_chars: int
     corpus_chars: int
+    factors: dict[str, Factor]
     stages: dict[str, Projection]
-
-    @property
-    def factors(self) -> dict[str, float]:
-        return {
-            CHARS: self.corpus_chars / self.pilot_chars,
-            CALLS: len(self.corpus) / len(self.piloted),
-        }
+    # (cheap, expensive) over one standard error of each fitted elasticity. The
+    # verdict is read at the expensive end: a gate exists to refuse a run that
+    # *may* overrun, not to report the midpoint of one that might.
+    span: tuple[float, float]
 
     @property
     def cost(self) -> float:
         return sum(p.cost for p in self.stages.values())
 
+    @property
+    def assumed(self) -> tuple[Factor, ...]:
+        """Factors that fell back to an assumption instead of a measurement."""
+        return tuple(f for f in self.factors.values() if not f.measured)
+
 
 @dataclass(frozen=True)
 class Cache:
-    """One (stage, condition)'s input side, split by how it was billed."""
+    """One group's input side, split by how it was billed."""
 
     stage: str
-    condition: str
+    axis: str  # "condition" or "transcript"
+    group: str
     records: int
     uncached: int  # `usage.input_tokens` — the part that paid full price
     read: int
@@ -185,12 +264,12 @@ def run(
     interrupted pilot leaves `runs/` holding complete notes rather than notes
     nobody ever attacked — and the resume gate has something to skip.
 
-    A note that cannot be attacked or stripped is **collected, not raised**: both
-    modules already wrote a record carrying what that note billed (#11, #12), and
-    a gate that aborts on note 4 of 30 has spent the money and reported nothing.
-    A *truncated* note is the exception and propagates, because it says
-    `MAX_TOKENS` is wrong for this corpus and 29 more calls under a known-broken
-    ceiling is not a measurement.
+    **Every recoverable failure is collected, not raised.** A refused note, a
+    failed attack and a note too dense to strip each already wrote a record
+    carrying what it billed (#10, #11, #12), and a gate that aborts on note 4 of
+    30 has spent the money and reported nothing. A *truncated* note is the one
+    exception and propagates, because it says `MAX_TOKENS` is wrong for this
+    corpus and 29 more calls under a known-broken ceiling is not a measurement.
     """
     failures: list[Failure] = []
     for transcript, text in rendered.items():
@@ -203,18 +282,20 @@ def run(
             created_at=created_at,
             conditions=conditions,
             samples=samples,
+            on_refusal=lambda condition, sample, exc, t=transcript: failures.append(
+                Failure(defender.STAGE, condition, t, sample, str(exc))
+            ),
         )
         for condition in conditions:
             for sample in range(samples):
                 record = store.read(defender.STAGE, condition, transcript, sample)
                 if record is None:
-                    # `defender.run` has just guaranteed this key. Skipping it
-                    # would retire a note nobody attacked and leave T3 short a
-                    # pair with nothing in `runs/` to show it.
                     raise RuntimeError(
                         f"no defender record at {condition}/{transcript}/{sample} "
                         "after writing it: the store disagrees with itself"
                     )
+                if defender.failed(record):
+                    continue  # nothing was distilled, so there is no note to attack
                 # `output`, never `raw_output`: C3's attacker sees the scrubbed
                 # note, and the control arm strips the note that was attacked.
                 note = record.output
@@ -252,23 +333,231 @@ def run(
     return failures
 
 
+# ---------------------------------------------------------- fitting the factors
+
+
+def _mean_sem(values: Sequence[float]) -> tuple[float, float]:
+    """Sample mean, and the standard error of that mean."""
+    n = len(values)
+    mean = sum(values) / n
+    if n < 2:
+        return mean, 0.0
+    variance = sum((v - mean) ** 2 for v in values) / (n - 1)
+    return mean, math.sqrt(variance / n)
+
+
+def _elasticity(points: Mapping[int, Sequence[float]]) -> tuple[float, float] | None:
+    """Fit `e` in `y = c * L^e`, and the standard error of `e`.
+
+    Ordinary least squares of `ln(mean y)` on `ln(L)`, one point per pilot
+    transcript. The slope *is* the elasticity, and `c` never has to be estimated
+    because it cancels out of `F(e)`.
+
+    `se` is propagated from each point's own within-transcript standard error
+    rather than from the residuals: with two transcripts the fit is exact and has
+    no residual to learn from, but each point has 15 samples behind it and that is
+    where the uncertainty actually lives.
+
+    None when there is nothing to fit — fewer than two transcripts, every pilot
+    transcript the same length, or a non-positive measurement. The caller then
+    falls back to a flat count and says so.
+    """
+    xs, ys, relative_variance = [], [], []
+    for length, values in points.items():
+        if length <= 0 or not values:
+            return None
+        mean, sem = _mean_sem(values)
+        if mean <= 0:
+            return None
+        xs.append(math.log(length))
+        ys.append(math.log(mean))
+        relative_variance.append((sem / mean) ** 2)
+    if len(xs) < 2:
+        return None
+    xbar = sum(xs) / len(xs)
+    sxx = sum((x - xbar) ** 2 for x in xs)
+    if sxx <= 0:  # no lever arm: every piloted transcript is the same length
+        return None
+    slope = sum((x - xbar) * y for x, y in zip(xs, ys)) / sxx
+    se = math.sqrt(sum(((x - xbar) / sxx) ** 2 * v for x, v in zip(xs, relative_variance)))
+    return slope, se
+
+
+def _elastic(sizes: Mapping[str, int], piloted: Sequence[str], e: float) -> float:
+    """`F(e)` — the corpus's summed `L^e` over the pilot's.
+
+    `F(0)` is the transcript count ratio and `F(1)` the character ratio, so the
+    two multipliers this gate used to hardcode are the endpoints of this one.
+    """
+    return sum(length**e for length in sizes.values()) / sum(sizes[t] ** e for t in piloted)
+
+
+def _prefix_model(
+    sizes: Mapping[str, int], writes: Mapping[str, int]
+) -> tuple[float, float] | None:
+    """Solve `prefix(L) = S + k*L` from the pilot's measured cache writes.
+
+    #10 caches the note-format spec together with the transcript, so a prefix is a
+    count-scaled constant plus a chars-scaled variable and neither basis alone can
+    express it. Two transcripts of different lengths are two equations.
+
+    The write per transcript is the **largest** single record's, not the sum: one
+    prefix is written once per transcript by design, and a TTL expiry mid-run adds
+    a second write that says nothing about the prefix's size.
+
+    None on a degenerate solve — equal lengths, or a fit implying a prefix that
+    shrinks with length or has negative fixed cost — which means the measurement
+    is too noisy to trust and the caller falls back to the character ratio.
+    """
+    points = sorted((sizes[t], w) for t, w in writes.items())
+    if len(points) < 2:
+        return None
+    (short_len, short_write), (long_len, long_write) = points[0], points[-1]
+    if long_len == short_len:
+        return None
+    k = (long_write - short_write) / (long_len - short_len)
+    spec = short_write - k * short_len
+    if k <= 0 or spec < 0:
+        return None
+    return spec, k
+
+
+@dataclass(frozen=True)
+class Measurements:
+    """What the pilot's records say about how spend responds to length."""
+
+    output_tokens: dict[int, list[float]]  # transcript length -> per-call output
+    note_chars: dict[int, list[float]]  # transcript length -> per-note characters
+    prefix_writes: dict[str, int]  # transcript -> its one cached-prefix write
+
+
+def _measurements(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Measurements:
+    """Read the fits' inputs off the defender's records.
+
+    Failure records are excluded from both fits: they carry no note, and their
+    output tokens are whatever a refusal cost rather than a measurement of how
+    much a transcript of that length makes the model write.
+    """
+    output: dict[int, list[float]] = {}
+    notes: dict[int, list[float]] = {}
+    writes: dict[str, int] = {}
+    for r in records:
+        if r.stage != defender.STAGE:
+            continue
+        writes[r.transcript] = max(
+            writes.get(r.transcript, 0), r.usage.cache_creation_input_tokens
+        )
+        if defender.failed(r):
+            continue
+        length = sizes[r.transcript]
+        output.setdefault(length, []).append(r.usage.output_tokens)
+        notes.setdefault(length, []).append(len(r.output))
+    return Measurements(output, notes, writes)
+
+
+def _clamp(e: float) -> float:
+    return min(max(e, E_RANGE[0]), E_RANGE[1])
+
+
+def _fitted(
+    name: str,
+    sizes: Mapping[str, int],
+    piloted: Sequence[str],
+    estimate: tuple[float, float] | None,
+    shift: float,
+) -> Factor | None:
+    if estimate is None:
+        return None
+    e, se = estimate
+    used = _clamp(e + shift * se)
+    return Factor(
+        name,
+        _elastic(sizes, piloted, used),
+        f"elasticity {e:+.2f} +/- {se:.2f}, used {used:.2f}; sum(L^e) corpus / pilot",
+    )
+
+
+def _factors(
+    sizes: Mapping[str, int],
+    piloted: Sequence[str],
+    measurements: Measurements,
+    shift: float = 0.0,
+) -> dict[str, Factor]:
+    """Every multiplier, measured where the pilot supports it and flagged where not."""
+    corpus_chars, pilot_chars = sum(sizes.values()), sum(sizes[t] for t in piloted)
+    calls = Factor(
+        CALLS,
+        len(sizes) / len(piloted),
+        f"{len(sizes)} corpus transcripts / {len(piloted)} piloted",
+    )
+    chars = Factor(
+        CHARS,
+        corpus_chars / pilot_chars,
+        f"{corpus_chars:,} corpus chars / {pilot_chars:,} pilot chars",
+    )
+
+    solved = _prefix_model(sizes, measurements.prefix_writes)
+    if solved is None:
+        prefix = replace(
+            chars,
+            name=PREFIX,
+            measured=False,
+            derivation=chars.derivation + "; prefix model unsolved, assuming pure chars",
+        )
+    else:
+        spec, k = solved
+        prefix = Factor(
+            PREFIX,
+            sum(spec + k * length for length in sizes.values())
+            / sum(spec + k * sizes[t] for t in piloted),
+            f"prefix = {spec:,.0f} + {k:.3f}/char, solved from measured cache writes",
+        )
+
+    def fallback(name: str, why: str) -> Factor:
+        return replace(calls, name=name, measured=False, derivation=f"{calls.derivation}; {why}")
+
+    thinking = _fitted(THINKING, sizes, piloted, _elasticity(measurements.output_tokens), shift)
+    notes = _fitted(NOTES, sizes, piloted, _elasticity(measurements.note_chars), shift)
+    return {
+        CALLS: calls,
+        CHARS: chars,
+        PREFIX: prefix,
+        THINKING: thinking or fallback(THINKING, "no fit, assuming output is flat per call"),
+        NOTES: notes or fallback(NOTES, "no fit, assuming note length is flat per call"),
+    }
+
+
 # ------------------------------------------------------------- the projection
 
 
-def _scale(totals: StageTotals, input_factor: float, output_factor: float) -> Usage:
-    """Input-side terms by one factor, output by the other.
-
-    Rounded, because a projected token count is still a count — and because a
-    fractional token in a `Usage` would be a lie about the field it sits in.
-    """
-    return Usage(
-        input_tokens=round(totals.input_tokens * input_factor),
-        output_tokens=round(totals.output_tokens * output_factor),
-        cache_read_input_tokens=round(totals.cache_read_input_tokens * input_factor),
-        cache_creation_input_tokens=round(
-            totals.cache_creation_input_tokens * input_factor
-        ),
-    )
+def _stages(records: Sequence[RunRecord], factors: Mapping[str, Factor]) -> dict[str, Projection]:
+    stages = {}
+    for stage, totals in summarise(records).items():
+        models = sorted({r.model for r in records if r.stage == stage})
+        if len(models) != 1:
+            # Not a warning. Scaling one number off two models' rates produces a
+            # dollar figure that belongs to neither.
+            raise ValueError(f"{stage} mixes models {models}: cannot project one cost")
+        bases = BASES.get(stage)
+        if bases is None:
+            raise ValueError(
+                f"{stage!r} has no entry in BASES; add one rather than letting it "
+                "default to a basis nobody chose"
+            )
+        # Rounded: a projected token count is still a count, and a fractional
+        # token in a `Usage` would be a lie about the field it sits in.
+        projected = Usage(
+            **{term: round(getattr(totals, term) * factors[bases[term]].value) for term in TERMS}
+        )
+        stages[stage] = Projection(
+            stage=stage,
+            model=models[0],
+            measured=totals,
+            bases=bases,
+            projected=projected,
+            cost=price(projected, models[0]),
+        )
+    return stages
 
 
 def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapolation:
@@ -276,8 +565,11 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
 
     `sizes` is the corpus, transcript id -> rendered chars. The pilot's own share
     is derived from the records — which transcripts the defender actually ran —
-    rather than read off `PILOT`, so switching the pilot pair moves the
-    multiplier with it and cannot leave a stale constant behind (#55).
+    rather than read off `PILOT`, so switching the pilot pair moves every factor
+    with it and cannot leave a stale constant behind (#55).
+
+    `span` re-runs the whole projection with each fitted elasticity moved one
+    standard error either way. The verdict is read at the expensive end.
     """
     piloted = sorted({r.transcript for r in records if r.stage == defender.STAGE})
     if not piloted:
@@ -289,129 +581,87 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
     if unknown:
         raise ValueError(f"records name transcripts absent from the corpus: {unknown}")
 
-    pilot_chars = sum(sizes[t] for t in piloted)
-    factors = {
-        CHARS: sum(sizes.values()) / pilot_chars,
-        CALLS: len(sizes) / len(piloted),
-    }
-
-    stages = {}
-    for stage, totals in summarise(records).items():
-        models = sorted({r.model for r in records if r.stage == stage})
-        if len(models) != 1:
-            # Not a warning. Scaling one number off two models' rates produces a
-            # dollar figure that belongs to neither.
-            raise ValueError(f"{stage} mixes models {models}: cannot project one cost")
-        basis = INPUT_BASIS.get(stage)
-        if basis is None:
-            raise ValueError(
-                f"{stage!r} has no entry in INPUT_BASIS; add one rather than "
-                "letting it default to a basis nobody chose"
-            )
-        projected = _scale(totals, factors[basis], factors[CALLS])
-        stages[stage] = Projection(
-            stage=stage,
-            model=models[0],
-            measured=totals,
-            input_basis=basis,
-            input_factor=factors[basis],
-            output_factor=factors[CALLS],
-            projected=projected,
-            cost=price(projected, models[0]),
-        )
+    measured = _measurements(records, sizes)
+    factors = _factors(sizes, piloted, measured)
+    stages = _stages(records, factors)
+    ends = sorted(
+        sum(p.cost for p in _stages(records, _factors(sizes, piloted, measured, s)).values())
+        for s in (-1.0, 1.0)
+    )
     return Extrapolation(
         piloted=tuple(piloted),
         corpus=tuple(sorted(sizes)),
-        pilot_chars=pilot_chars,
+        pilot_chars=sum(sizes[t] for t in piloted),
         corpus_chars=sum(sizes.values()),
+        factors=factors,
         stages=stages,
+        span=(ends[0], ends[1]),
     )
 
 
 # ------------------------------------------------------------------ the cache
 
 
-def cache_by_condition(records: Sequence[RunRecord]) -> tuple[Cache, ...]:
-    """The input side per (stage, condition), never pooled — see `cache_warnings`."""
-    rows: dict[tuple[str, str], list[RunRecord]] = {}
+def _rows(records: Sequence[RunRecord], axis: str, key) -> tuple[Cache, ...]:
+    groups: dict[tuple[str, str], list[RunRecord]] = {}
     for r in records:
-        rows.setdefault((r.stage, r.condition), []).append(r)
+        groups.setdefault((r.stage, key(r)), []).append(r)
     return tuple(
         Cache(
             stage=stage,
-            condition=condition,
+            axis=axis,
+            group=group,
             records=len(rs),
             uncached=sum(r.usage.input_tokens for r in rs),
             read=sum(r.usage.cache_read_input_tokens for r in rs),
             written=sum(r.usage.cache_creation_input_tokens for r in rs),
         )
-        for (stage, condition), rs in sorted(rows.items())
+        for (stage, group), rs in sorted(groups.items())
     )
 
 
-def cache_warnings(rows: Sequence[Cache]) -> list[str]:
-    """One line per (stage, condition) that never read the cache.
+def cache_rows(records: Sequence[RunRecord]) -> tuple[Cache, ...]:
+    """Both groupings, because the two answer different questions.
 
-    Pooled, a cache ratio can read healthy while one condition never cached at
-    all. Opus 5's minimum cacheable prefix is 512 tokens and C3's scrubbed notes
-    are the shortest artefacts in the pipeline, so the attacker's and the control
-    arm's C3 prefixes are the ones most likely to fall under it — and a condition
-    that never caches costs roughly double on every one of its turns.
+    The attacker's prefix is the note, so its cache behaviour is a property of the
+    **condition**: C3's scrubbed notes are the shortest artefacts in the pipeline
+    and the ones that can fall under Opus 5's minimum cacheable prefix.
+
+    The defender's prefix is the **transcript** — #10 caches one per transcript
+    across all 15 of its calls — so condition rows say nothing about it. A run
+    where one transcript caches perfectly and another never caches at all shows
+    three identical, healthy-looking condition rows. #14 asks for a non-zero read
+    *after the first call per transcript*, and only the transcript grouping
+    answers that.
+    """
+    return _rows(records, "condition", lambda r: r.condition) + _rows(
+        records, "transcript", lambda r: r.transcript
+    )
+
+
+def cache_warnings(rows: Sequence[Cache], floor: float = CACHE_FLOOR) -> list[str]:
+    """One line per group whose cache is not doing its job.
+
+    A **ratio** floor, not `read == 0`: #10's layout predicts 14 reads per write
+    for the defender, so a cache limping along at 1% of its input side is as
+    broken as one at 0% and used to be silent. Groups of one record are exempt —
+    the first call has to write before anything can read.
+
+    The cause is deliberately left open. A prefix under Opus 5's 512-token minimum
+    is one candidate; something volatile in the prefix, or a gap longer than the
+    5-minute TTL, produce the same row and want different fixes.
     """
     return [
-        f"{row.stage} {row.condition} read the cache on none of its {row.records} "
-        f"record(s): that condition's prefix never hits, and under "
-        f"{MIN_CACHEABLE_TOKENS} tokens it never will"
+        f"{row.stage} {row.axis}={row.group} read {row.ratio:.0%} of its input side "
+        f"across {row.records} records, under the {floor:.0%} floor: the prefix is "
+        "mostly missing (too short to cache, volatile, or expired between calls), "
+        "and an uncached prefix costs about ten times a cached one"
         for row in rows
-        if row.records and not row.read
+        if row.records > 1 and row.ratio < floor
     ]
 
 
 # ----------------------------------------------------------------- the report
-
-
-def _bias_note(extrapolation: Extrapolation, sizes: Mapping[str, int]) -> str:
-    """Say it when the pilot pair is not the corpus's typical length.
-
-    Against the **median**, not the mean: the corpus is bimodal and the mean is
-    dragged upward by the two outliers that are currently being piloted, so a
-    mean comparison understates exactly the bias it is meant to surface.
-
-    The projection corrects for size; the *cache ratio* it reports cannot be
-    corrected by arithmetic at all, because a longer transcript amortises its
-    cached prefix over the same 15 calls. Printed only while it is true, so it
-    disappears if the pilot moves to the median rather than becoming boilerplate
-    nobody reads.
-    """
-    pilot_mean = extrapolation.pilot_chars / len(extrapolation.piloted)
-    lengths = sorted(sizes.values())
-    half = len(lengths) // 2
-    median = (
-        lengths[half] if len(lengths) % 2 else (lengths[half - 1] + lengths[half]) / 2
-    )
-    if abs(pilot_mean - median) <= BIAS_TOLERANCE * median:
-        return ""
-    longer = pilot_mean > median
-    # A transcript already being piloted is not a candidate to switch to. Ties
-    # break on the name, because the input is a set and two transcripts of equal
-    # distance would otherwise swap places between runs of the same report.
-    candidates = sorted(
-        set(sizes) - set(extrapolation.piloted), key=lambda t: (abs(sizes[t] - median), t)
-    )
-    return (
-        f"\nnote: the pilot pair averages {pilot_mean:,.0f} chars against a corpus median of "
-        f"{median:,.0f}.\n"
-        f"      {'Longer' if longer else 'Shorter'} transcripts amortise a cached prefix over the "
-        f"same {len(defender.CONDITIONS) * defender.SAMPLES} calls, so the\n"
-        f"      cache-read ratio above is {'optimistic' if longer else 'pessimistic'} for the full "
-        f"run. The size multiplier\n"
-        f"      corrects the token totals; it cannot correct this. Piloting nearer the corpus\n"
-        f"      median would. That is a choice about which transcripts to run, and it is\n"
-        f"      surfaced here rather than taken.\n"
-        f"      Median-length candidates: "
-        + ", ".join(f"{t} ({sizes[t]:,})" for t in candidates[: len(extrapolation.piloted)])
-        + "\n"
-    )
 
 
 def _usage_row(label: str, records: int, u: Usage, cost: float) -> str:
@@ -426,55 +676,77 @@ def _projection_table(extrapolation: Extrapolation) -> list[str]:
         f"{'stage':<10}{'records':>9}{'input':>12}{'cache_read':>12}"
         f"{'cache_write':>13}{'output':>12}{'cost $':>11}"
     ]
-    for stage, p in extrapolation.stages.items():
-        lines.append(
-            _usage_row(
-                stage,
-                round(p.measured.calls * p.output_factor),
-                p.projected,
-                p.cost,
-            )
-        )
+    calls = extrapolation.factors[CALLS].value
+    for p in extrapolation.stages.values():
+        lines.append(_usage_row(p.stage, round(p.measured.calls * calls), p.projected, p.cost))
     lines.append(f"{'TOTAL':<10}{'':>57}{extrapolation.cost:>11.2f}")
     return lines
 
 
 def _derivation(extrapolation: Extrapolation) -> list[str]:
-    factors = extrapolation.factors
-    return [
+    lines = ["", "multipliers, and where each came from"]
+    for factor in extrapolation.factors.values():
+        flag = "" if factor.measured else "   [ASSUMED, not measured]"
+        lines.append(f"  {factor.name:<9}{factor.value:>7.2f}   {factor.derivation}{flag}")
+    lines += ["", "  applied per stage and per term:"]
+    for p in extrapolation.stages.values():
+        for term in TERMS:
+            lines.append(
+                f"    {p.stage:<9} {term:<28} x "
+                f"{extrapolation.factors[p.bases[term]].value:>5.2f}  ({p.bases[term]})"
+            )
+    lines += [
         "",
-        "multipliers, and where they came from",
-        f"  {CHARS:<7}{factors[CHARS]:>7.2f}   {extrapolation.corpus_chars:,} corpus chars / "
-        f"{extrapolation.pilot_chars:,} pilot chars",
-        f"  {CALLS:<7}{factors[CALLS]:>7.2f}   {len(extrapolation.corpus)} corpus transcripts / "
-        f"{len(extrapolation.piloted)} piloted",
-        "",
-        "  applied per stage:"
-        + "".join(
-            f"\n    {p.stage:<9} input x {p.input_factor:.2f} ({p.input_basis})"
-            f"   output x {p.output_factor:.2f} ({CALLS})"
-            for p in extrapolation.stages.values()
-        ),
-        "",
-        "  The defender re-reads a whole transcript per call, so its input side follows",
-        "  corpus size. Every other term is one note per call, so it follows the count.",
-        "  A flat count on the defender's input is #55 and overstates it by 73% on the",
-        "  current pair; characters on the attacker would understate it the same way.",
+        "  Output tokens are the bill: thinking bills at $25/MTok, and the defender's",
+        "  whole input side is bounded above by ~$3.22 even with the cache never hitting.",
+        "  So the output terms scale by a *fitted* elasticity to transcript length rather",
+        "  than a flat count. F(0) is the count ratio and F(1) the character ratio, so",
+        "  picking either without measuring is asserting e=0 or e=1 in silence.",
     ]
+    return lines
 
 
 def _cache_table(rows: Sequence[Cache]) -> list[str]:
     lines = [
         "",
-        "cache reads, per condition (pooled, one condition at zero is invisible)",
-        f"{'stage':<10}{'cond':<7}{'records':>9}{'cache_read':>12}{'input side':>12}{'read %':>9}",
+        "cache reads, per condition and per transcript (the defender's prefix is per",
+        "transcript, so only the second grouping answers #14's check)",
+        f"{'stage':<10}{'axis':<11}{'group':<30}{'records':>8}{'cache_read':>12}"
+        f"{'input side':>12}{'read %':>8}",
     ]
     for row in rows:
         lines.append(
-            f"{row.stage:<10}{row.condition or '-':<7}{row.records:>9}"
-            f"{row.read:>12}{row.total:>12}{row.ratio:>8.0%}"
+            f"{row.stage:<10}{row.axis:<11}{row.group:<30}{row.records:>8}"
+            f"{row.read:>12}{row.total:>12}{row.ratio:>7.0%}"
         )
     return lines
+
+
+def _span_note(extrapolation: Extrapolation, sizes: Mapping[str, int]) -> str:
+    """The pilot pair's shape, in the one sentence it is worth.
+
+    Deliberately short. An earlier draft argued at length that a longer pilot pair
+    biases the cache ratio; the read:write ratio is 14:1 because 15 calls share one
+    prefix *by design*, and length moves it across the whole corpus by about a
+    tenth of a percentage point — while `transcript.MIN_CHARS` rules out the one
+    length effect that would matter, falling under the 512-token floor. What length
+    actually biases is the count-scaled terms, and those are now fitted rather than
+    assumed. So all that is left to say is what the pair spans, and what still
+    rests on an assumption.
+    """
+    lengths = sorted(sizes[t] for t in extrapolation.piloted)
+    mean = extrapolation.corpus_chars / len(extrapolation.corpus)
+    line = (
+        f"\npilot pair spans {lengths[0]:,}-{lengths[-1]:,} chars against a corpus mean of "
+        f"{mean:,.0f};\nthat span is the lever arm every fitted elasticity is measured over.\n"
+    )
+    if extrapolation.assumed:
+        line += (
+            "Falling back to a flat count on: "
+            + ", ".join(f.name for f in extrapolation.assumed)
+            + ".\nThose terms are projected on an assumption this pilot did not test.\n"
+        )
+    return line
 
 
 def report(
@@ -486,9 +758,10 @@ def report(
 ) -> int:
     """Print the projection and return the gate's exit code.
 
-    Non-zero means **do not launch the full run**: over budget, a note that
-    failed, or a condition that never cached. A gate that exits 0 on an overrun
-    is not a gate.
+    Non-zero means **do not launch the full run**: the expensive end of the fit is
+    over budget, a note failed, a factor fell back to an assumption, a stage
+    drifted in model, effort or prompt, or a group barely read its cache. A gate
+    that exits 0 on an overrun is not a gate.
     """
     extrapolation = project(records, sizes)
     conditions, samples = len(defender.CONDITIONS), defender.SAMPLES
@@ -507,18 +780,21 @@ def report(
         "does not reach the cost."
     )
 
-    rows = cache_by_condition(records)
+    rows = cache_rows(records)
     for line in _cache_table(rows):
         print(line)
-    print(_bias_note(extrapolation, sizes), end="")
+    print(_span_note(extrapolation, sizes), end="")
 
-    over = extrapolation.cost - budget
-    verdict = (
-        f"OVER by {over:,.2f}" if over > 0 else f"fits, with {-over:,.2f} of headroom"
+    low, high = extrapolation.span
+    over = high - budget
+    verdict = f"OVER by {over:,.2f}" if over > 0 else f"fits, with {-over:,.2f} of headroom"
+    # ASCII only, here and above: this prints to a console, and a cp1252 terminal
+    # raises UnicodeEncodeError on the em dash the prose wants.
+    print(
+        f"\nprojected {extrapolation.cost:,.2f}, and {low:,.2f} to {high:,.2f} over one standard\n"
+        f"error of each fitted elasticity. Against a ~{budget:,.2f} budget, read at the\n"
+        f"expensive end: {verdict}"
     )
-    # ASCII only, here and in `_bias_note`: this is printed to a console, and a
-    # cp1252 terminal raises UnicodeEncodeError on the em dash the prose wants.
-    print(f"\nprojected {extrapolation.cost:,.2f} against a ~{budget:,.2f} budget: {verdict}")
     if over > 0:
         print(
             "levers, least damaging first: attacker effort medium -> low; control arm on a\n"
@@ -526,7 +802,14 @@ def report(
             "symmetry argument and turns T3 back into a lower bound."
         )
 
-    problems = list(cache_warnings(rows))
+    problems = [
+        f"{f.name} fell back to an assumption: {f.derivation}" for f in extrapolation.assumed
+    ]
+    problems += cache_warnings(rows)
+    # The ladder's first rung is re-running at a lower effort, and `runs.exists()`
+    # keys on four coordinates — so it keeps every record written under the old
+    # setting and the re-measured cost lands low, the reassuring direction.
+    problems += provenance_warnings(tuple(records))
     problems += [str(f) for f in failures]
     for problem in problems:
         print(f"\nwarning: {problem}")

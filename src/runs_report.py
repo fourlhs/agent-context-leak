@@ -45,7 +45,14 @@ CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
 # Fields that must not vary within a stage — see the module docstring.
-PROVENANCE = ("model", "effort", "prompt_hash")
+PROVENANCE = ("model", "effort")
+
+# `prompt_hash` is checked within (stage, condition) rather than within a stage,
+# because it is *supposed* to vary by condition: C2 appends its instruction, and
+# C1 and C3 share a hash by construction. Checked per stage it fires on every
+# real defender run, and a warning that is always on is a warning nobody reads —
+# which matters more since #14 folds these into the gate's own exit code.
+CONDITIONAL_PROVENANCE = ("prompt_hash",)
 
 
 @dataclass(frozen=True)
@@ -111,8 +118,17 @@ def summarise(records: tuple[RunRecord, ...]) -> dict[str, StageTotals]:
     return {stage: _totals(rs) for stage, rs in _by_stage(records).items()}
 
 
+def _mixed(label: str, records: tuple[RunRecord, ...], fields: tuple[str, ...]) -> list[str]:
+    warnings = []
+    for field in fields:
+        values = sorted({getattr(r, field) for r in records})
+        if len(values) > 1:
+            warnings.append(f"{label} mixes {field}: {', '.join(values)}")
+    return warnings
+
+
 def provenance_warnings(records: tuple[RunRecord, ...]) -> list[str]:
-    """One line per stage that holds more than one value of a provenance field.
+    """One line per group that holds more than one value of a provenance field.
 
     `exists()` keys on (stage, condition, transcript, sample), so relaunching
     after changing the prompt, the model, or the effort keeps every completed
@@ -120,13 +136,19 @@ def provenance_warnings(records: tuple[RunRecord, ...]) -> list[str]:
     `medium`, comes in hot, someone applies escalation lever 1 and relaunches at
     `low`. Nothing errors, `runs/` quietly holds both, #13 aggregates across
     them, and the re-measured cost lands low — the reassuring direction.
+
+    Model and effort are checked across a whole stage, because neither may vary at
+    all. `prompt_hash` is checked within a condition, because it varies *by*
+    condition on purpose — see `CONDITIONAL_PROVENANCE`.
     """
     warnings = []
+    by_condition: dict[tuple[str, str], list[RunRecord]] = {}
     for stage, rs in _by_stage(records).items():
-        for field in PROVENANCE:
-            values = sorted({getattr(r, field) for r in rs})
-            if len(values) > 1:
-                warnings.append(f"{stage} mixes {field}: {', '.join(values)}")
+        warnings += _mixed(stage, rs, PROVENANCE)
+        for r in rs:
+            by_condition.setdefault((r.stage, r.condition), []).append(r)
+    for (stage, condition), rs in sorted(by_condition.items()):
+        warnings += _mixed(f"{stage}/{condition or '-'}", tuple(rs), CONDITIONAL_PROVENANCE)
     return warnings
 
 

@@ -68,6 +68,12 @@ class RunRecord:
     usage: Usage
     git_sha: str
     created_at: str  # ISO 8601, supplied by the caller
+    # Why the stage stopped. Computed at every call site and, before #14, thrown
+    # away: a defender refusal then left no trace anywhere, because the record it
+    # would have appeared on was never written. Defaulted, so records written
+    # before it existed still load. The attacker's per-turn reasons stay in
+    # `raw_output`; this is the one that ended the stage.
+    stop_reason: str = ""
     # C3's pre-scrub generation; "" wherever there is nothing else to keep.
     # `output` is always the text that leaves the stage — what the attacker
     # sees — so #11 is unaffected by this field existing. Defaulted, so records
