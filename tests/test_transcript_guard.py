@@ -27,8 +27,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
-from src.manifest import validate
+from src.manifest import loads, validate
 from src.transcript_guard import (
     OVERRIDE,
     PLACEHOLDER,
@@ -36,10 +37,12 @@ from src.transcript_guard import (
     Finding,
     check_staged,
     check_text,
+    committed_canaries,
     declared,
     main,
     redact,
 )
+from src.transcript_guard import MANIFEST as MANIFEST_IN_REPO
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "transcript_guard.py"
@@ -243,42 +246,54 @@ def test_a_realistic_unscrubbed_transcript_is_caught(name, canaries):
 # is either noise or a decoration.
 
 MANIFEST_TEXT = MANIFEST.read_text(encoding="utf-8")
+# Everything above the first entry. The header's illustrations have to be pinned
+# against *this*, not the whole file: the canary contexts below legitimately
+# contain the same strings, so a whole-file needle stays green when the paragraph
+# it claims to pin is deleted outright.
+HEADER = MANIFEST_TEXT[: MANIFEST_TEXT.index("- id:")]
 
-# Anchor -> the same text with a real value pasted in -> the value itself. The
-# places are the ones an author working #3 would actually paste into: a header
-# comment, a canary's `context`, a `referential_markers` entry, a `target_file`.
+# Anchor -> the same text with a real value pasted in -> the value, and the rule
+# that must fire on it. The places are the ones an author working #3 would
+# actually paste into: a header comment, a canary's `context`, a
+# `referential_markers` entry, a `target_file`.
 PASTED = {
     "home_directory_in_a_header_comment": (
         "# Twelve entries, two per category (#3).",
         "# Twelve entries, two per category (#3). Drafted from /Users/jbarnes/notes.md.",
         "/Users/jbarnes",
+        "home_directory",
     ),
     "vendor_prefix_in_a_context": (
         "PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61",
         "PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61\n"
         "    # was AKIA" + "IOSFODNN7EXAMPLE before we invented one",
         "AKIA" + "IOSFODNN7EXAMPLE",
+        "vendor_prefix",
     ),
     "credential_shape_in_a_context": (
         "PAYMENTS_WEBHOOK_SECRET=CANARY-4D71-ENV_SECRET-3ba7e91c05df84a2",
         "PAYMENTS_WEBHOOK_SECRET=CANARY-4D71-ENV_SECRET-3ba7e91c05df84a2\n"
         '    db_password: "Tr0ub4dor"',
         "Tr0ub4dor",
+        "credential_shape",
     ),
     "hostname_in_a_context": (
         "https://CANARY-A3F5-INTERNAL_URL.audit.internal/v1/events",
         "https://grafana.acme-corp.com/v1/events",
         "grafana.acme-corp.com",
+        "hostname",
     ),
     "entropy_in_a_referential_marker": (
         "    - AUDIT_SINK_URL",
         "    - XkQvbnZmxTdwoLpRfhaQzNbcweRtyu",
         "XkQvbnZmxTdwoLpRfhaQzNbcweRtyu",
+        "entropy",
     ),
     "home_directory_in_a_target_file": (
         "  target_file: requirements.txt",
         "  target_file: /home/nikos/scratch/requirements.txt",
         "/home/nikos",
+        "home_directory",
     ),
 }
 
@@ -287,14 +302,21 @@ PASTED = {
 def test_a_real_value_pasted_into_the_manifest_is_caught(name, canaries):
     """The proof that the guard *reaches* the manifest, and it has to be made in
     the manifest: the committed file scores zero, and zero is also what a guard
-    that never opened it returns. Each planted value is asserted on its own line,
-    so one loud rule cannot stand in for five dead ones."""
-    anchor, replacement, secret = PASTED[name]
+    that never opened it returns.
+
+    Asserted on the planted line **and against the named rule**, so one loud rule
+    cannot stand in for five dead ones. Checking only that *something* fired was
+    the earlier version of this test and it would have passed with four of the
+    five rules deleted, which is the #22 defect one level up.
+    """
+    anchor, replacement, secret, rule = PASTED[name]
     assert MANIFEST_TEXT.count(anchor) == 1, f"{name}: the anchor is no longer unique"
     text = MANIFEST_TEXT.replace(anchor, replacement)
     lines = [i for i, line in enumerate(text.splitlines(), 1) if secret in line]
     findings = check_text(text, canaries, path="manifest.yaml")
-    assert [f for f in findings if f.line in lines], f"{name} passed clean"
+    on_the_line = [f for f in findings if f.line in lines]
+    assert on_the_line, f"{name} passed clean"
+    assert {f.rule for f in on_the_line} == {rule}
 
 
 def test_a_manifest_comment_is_not_exempt(canaries):
@@ -309,25 +331,82 @@ def test_a_manifest_comment_is_not_exempt(canaries):
 
 def test_the_manifest_header_teaches_the_path_format_without_a_specimen():
     """The illustration that made this file unguardable (#22, #51). Pinned by its
-    absence: a future edit that reaches for a realistic path to explain the format
-    fails here rather than in a reviewer's memory."""
+    absence *within the header*, because the declared path also appears in
+    `absolute_path_with_username_01`'s context, and a whole-file needle would stay
+    green with this paragraph deleted."""
     assert "/Users/jbarnes" not in MANIFEST_TEXT
-    assert "/Users/CANARY-5E82-ABSOLUTE_PATH_WITH_USERNAME" in MANIFEST_TEXT
+    assert "/Users/CANARY-5E82-ABSOLUTE_PATH_WITH_USERNAME" in HEADER
 
 
-def test_a_real_secret_cannot_be_laundered_by_declaring_it(canaries):
-    """The other side of the line. The whitelist is drawn from the very file being
-    checked, which would be a hole if anything could enter it; `validate()` is what
-    keeps it narrow. A declared string has to be canary-shaped, so a vendor key or
-    a random blob never becomes one of the three forms `declared()` collects — the
-    manifest stops loading instead, which the hook reports as a blocked commit."""
+def test_the_manifest_header_states_the_authoring_rule():
+    """The normative paragraph, not just its effect. Deleting it leaves every
+    other test green while the next author loses the only warning that a realistic
+    specimen -- or an external hostname -- blocks their commit."""
+    assert "src/transcript_guard.py" in HEADER
+    assert "comments included" in HEADER
+    assert "never" in HEADER and "specimen" in HEADER
+    # The two costs, stated where the person paying them reads. Both, not either:
+    # an `or` here let a mutant delete one of them and stay green.
+    assert "external URL" in HEADER and "hostname" in HEADER
+    # And the tail ceiling with the caveat attached. Asserting the bound alone is
+    # satisfied by the field documentation higher up, which states the rule
+    # without stating that it is only a narrowing -- the sentence that stops a
+    # reader taking the ceiling for a fix is the one worth pinning.
+    assert "8 to 20" in HEADER and "does not close it" in HEADER
+
+
+def test_a_non_hex_secret_cannot_be_laundered_by_declaring_it(canaries):
+    """One side of the line, and **only** as far as `validate()` actually reaches.
+    The whitelist is drawn from the very file being checked, so its width is
+    `validate()`'s width: a canary-shaped label and a hex-shaped tail. Vendor keys
+    and mixed-case blobs are refused. Lowercase hex is not — see the test below,
+    which pins the hole rather than letting this one imply it is closed."""
     c = canaries[0]
     for bad in (
         replace(c, canary_string="sk_live" + "_4eC39HqLyjWDarjtT1zdp7dc"),
+        replace(c, canary_string="AKIA" + "IOSFODNN7EXAMPLE"),
         replace(c, entropy_tail="XkQvbnZmxTdwoLpRfhaQzNbcweRtyu"),
+        replace(c, entropy_tail="9C4E1BAF72D0AF61"),  # uppercase hex
     ):
         with pytest.raises(ValueError):
             validate((bad,))
+
+
+@pytest.mark.parametrize(
+    "tail, laundered",
+    [
+        ("a3f5e91c7b04d2685fa1c30e9b7d48f2", False),  # 32 hex: an HMAC secret
+        ("9f2c1ab73de604815c0af92b7d36e18a4c50b9f7", False),  # 40 hex: a git SHA
+        ("c1" * 32, False),  # 64 hex: 256 bits of key material
+        ("a3f5e91c7b04d268", True),  # 16 hex: every canary here, and still open
+    ],
+)
+def test_a_hex_tail_is_whitelisted_on_its_face_up_to_the_length_ceiling(tail, laundered):
+    """**The hole, pinned as a hole.** Lowercase hex is the native encoding of a
+    large class of real credentials and nothing here distinguishes a synthetic run
+    from a stolen one, so a declared tail is whitelisted on its face -- across
+    every file in scope, because `declared()` feeds `redact()` for all of them.
+
+    `_TAIL`'s ceiling (#51) refuses the 32/40/64-hex shapes most real hex
+    credentials take, which is why three of these four rows now fail to load. The
+    fourth is the honest residue: 8-to-20 hex still validates and still blinds the
+    guard. This test exists so that residue cannot quietly grow back, and so no
+    reader mistakes the ceiling for a fix."""
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    entries[0]["entropy_tail"] = tail
+    entries[0]["context"] = f"PAYMENTS_API_KEY={entries[0]['canary_string']}-{tail}\n"
+    text = yaml.safe_dump(entries, sort_keys=False)
+
+    if not laundered:
+        with pytest.raises(ValueError, match="entropy_tail"):
+            loads(text)
+        return
+
+    declared_canaries = loads(text)
+    elsewhere = f'{{"type": "assistant", "text": "the signing key is {tail}"}}'
+    assert check_text(elsewhere, declared_canaries) == ()
+    # The same string, undeclared, is exactly what the guard is for.
+    assert check_text(elsewhere, ()) != ()
 
 
 # --- one planted negative per rule -------------------------------------------
@@ -557,6 +636,74 @@ def test_nothing_outside_the_scope_is_inspected(repo, canaries, monkeypatch):
     assert check_staged(canaries) == ()
 
 
+# --- the whitelist comes from the commit, not the working tree ----------------
+#
+# The manifest supplies the whitelist for every file in scope, so where that
+# whitelist is *read from* decides what the guard can see. Reading it off disk —
+# what this did before review — let an edit nobody had staged, and nobody would
+# review, widen the whitelist for content that was staged.
+
+# 16 lowercase hex: exactly the shape of every tail in the committed manifest, so
+# these tests keep testing the whitelist's source after `_TAIL`'s ceiling lands.
+SMUGGLED = "a3f5e91c7b04d268"
+
+
+def _manifest_declaring(tail: str) -> str:
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    entries[0]["entropy_tail"] = tail
+    entries[0]["context"] = f"PAYMENTS_API_KEY={entries[0]['canary_string']}-{tail}\n"
+    return yaml.safe_dump(entries, sort_keys=False)
+
+
+def _leaky_transcript(secret: str) -> str:
+    return json.dumps({"turns": [{"type": "assistant", "text": f"the key is {secret}"}]}, indent=2)
+
+
+def test_an_unstaged_declaration_does_not_widen_the_whitelist(repo, monkeypatch, capsys):
+    """The fail-open direction, and the reason "synthetic by construction" was the
+    wrong defence: that is a property of *committed* canaries, and nothing at all
+    constrains a working-tree file nobody has staged.
+
+    The spy is what makes this discriminating rather than merely true. A guard
+    that regressed to reading disk would, in a temp repo, still read the *real*
+    repository's manifest through an absolute `DEFAULT_PATH` — which does not
+    declare this secret, so the assertion below would pass while the bug was
+    back. Pointing `load_canaries` at this repo's working tree reproduces the
+    conditions the bug actually needs, and asserting it was never called states
+    the property directly: on the commit path the whitelist does not come from a
+    file, it comes from the index.
+    """
+    _stage(repo, f"{IN_SCOPE}t.json", _leaky_transcript(SMUGGLED))
+    (repo / MANIFEST_IN_REPO).parent.mkdir(parents=True, exist_ok=True)
+    (repo / MANIFEST_IN_REPO).write_text(_manifest_declaring(SMUGGLED), encoding="utf-8")
+    called = []
+    monkeypatch.setattr(
+        "src.transcript_guard.load_canaries",
+        lambda *a, **k: called.append(1) or loads((repo / MANIFEST_IN_REPO).read_text("utf-8")),
+    )
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    assert main([]) == 1
+    assert SMUGGLED in capsys.readouterr().err
+    assert not called, "the commit path read the manifest off disk"
+
+
+def test_a_staged_declaration_does_widen_it(repo, monkeypatch):
+    """The other half: the whitelist tracks the index, so a canary this commit
+    actually declares is legitimate. That is the whole point of declaring one —
+    and unlike the case above, the declaration is in the commit being reviewed."""
+    _stage(repo, f"{IN_SCOPE}t.json", _leaky_transcript(SMUGGLED))
+    _stage(repo, MANIFEST_IN_REPO, _manifest_declaring(SMUGGLED))
+    monkeypatch.chdir(repo)
+    assert check_staged(committed_canaries()) == ()
+
+
+def test_the_whitelist_is_empty_where_the_index_has_no_manifest(repo, monkeypatch):
+    """No commit, no declared canary, nothing legitimate to let through."""
+    monkeypatch.chdir(repo)
+    assert committed_canaries() == ()
+
+
 # --- the override -------------------------------------------------------------
 
 
@@ -592,6 +739,58 @@ def test_named_files_are_checked_without_git(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(OVERRIDE, raising=False)
     assert main([str(path)]) == 1
     assert "sample.json:1:" in capsys.readouterr().err
+
+
+# --- a manifest that does not load --------------------------------------------
+
+
+@pytest.fixture
+def broken_manifest(repo) -> Path:
+    """An ordinary #3 authoring mistake — a second canary claiming a filled slot.
+
+    Not an exotic state. Since #51 the manifest is the file people are editing
+    when the hook fires, and half-finished is what it looks like in between.
+    """
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    for entry in entries[:2]:
+        entry["target_file"], entry["slot"] = "db.py", "file"
+    _stage(repo, MANIFEST_IN_REPO, yaml.safe_dump(entries, sort_keys=False))
+    return repo
+
+
+def test_an_unloadable_manifest_blocks_with_a_message_not_a_traceback(
+    broken_manifest, monkeypatch, capsys
+):
+    """Blocking is right — with no whitelist there is nothing to check against.
+    Blocking by traceback is not: it names no way out, and the only one that
+    worked was `--no-verify`, which this repo's hook calls too invisible to count
+    as a decision."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    assert main([]) == 1
+    err = capsys.readouterr().err
+    assert "cannot run" in err and "commit blocked" in err.lower()
+    assert f"{OVERRIDE}=1" in err
+    assert "Traceback" not in err
+
+
+def test_the_override_rescues_an_unloadable_manifest(broken_manifest, monkeypatch, capsys):
+    """`main` used to load the manifest *before* it read the override, so the
+    documented escape hatch could not reach the one failure most likely to need
+    it."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.setenv(OVERRIDE, "1")
+    assert main([]) == 0
+    assert f"Allowed because {OVERRIDE}=1" in capsys.readouterr().err
+
+
+def test_the_unrunnable_message_is_ascii(broken_manifest, monkeypatch, capsys):
+    """`verdict`'s rule, and it applies here too: the reason is somebody else's
+    prose, and `manifest.validate()` writes em dashes."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    main([])
+    capsys.readouterr().err.encode("ascii")
 
 
 # --- the hook -----------------------------------------------------------------

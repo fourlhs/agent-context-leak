@@ -32,33 +32,53 @@ under test would catch has it backwards. Hence a vendor prefix with no length
 gate, a blob rule tighter than the scrubber's, and a second pass over `/`-joined
 runs.
 
-**Where the line is on the manifest (#51).** `canaries/manifest.yaml` is
-*supposed* to hold secret-shaped strings — that is what a canary is — so a guard
-over it needs a rule for which ones are legitimate, and a guard that trusted the
-whole file would be a decoration. The line is `redact()` plus
-`manifest.validate()`: a string passes iff the manifest declares it as a
-`canary_string`, an `entropy_tail`, or the `planted_value` those two compose,
-**and** `validate()` accepted the declaration — which forces
-`CANARY-<4 hex>-<CATEGORY>` on the label and 8+ lowercase hex on the tail. So a
-real key pasted into a canary field cannot launder itself into the whitelist:
-`validate()` refuses the declaration, the manifest stops loading, and nothing
-commits. Everything outside those three fields — contexts, markers, target
-paths, and **comments** — is read exactly as a transcript is.
+**Where the line is on the manifest (#51). This paragraph is the authoritative
+statement of it; `README.md` and `CLAUDE.md` summarise and point here.**
+
+`canaries/manifest.yaml` is *supposed* to hold secret-shaped strings — that is
+what a canary is — so a guard over it needs a rule for which ones are legitimate,
+and a guard that trusted the whole file would be a decoration. The line is
+`redact()` plus `manifest.validate()`: a string passes iff the manifest declares
+it as a `canary_string`, an `entropy_tail`, or the `planted_value` those two
+compose, **and** `validate()` accepted the declaration. Everything outside those
+three fields — contexts, markers, target paths, and **comments** — is read
+exactly as a transcript is.
+
+**What that closes, and what it does not.** The whitelist is drawn from the file
+under inspection, so its width is exactly `validate()`'s width, and `validate()`
+is uneven:
+
+- `canary_string` is **closed**. It must match `CANARY-<4 hex>-<CATEGORY>` with
+  the suffix equal to the declared category, so no real credential shape fits.
+- A **non-hex** tail is closed. `sk_live_...`, base64, a mixed-case blob: refused.
+- A **lowercase-hex** tail is **accepted on its face, and that is a real hole.**
+  Hex is the native encoding of a large class of real credentials, and nothing
+  here can tell a synthetic 16-hex run from a stolen one. #51 narrowed
+  `manifest._TAIL` to `[0-9a-f]{8,20}`, which refuses the 32/40/64-hex shapes
+  that most real hex credentials take — every canary here uses 16 — but 8-to-20
+  hex still validates and is still whitelisted.
+
+The blast radius of that hole is the whole scope, not just the manifest:
+`declared()` feeds `redact()` for **every** file checked, so a real secret
+committed as a tail is thereafter invisible in transcripts too. It is the reason
+the ceiling exists and the reason this paragraph does not claim more than it can.
+
+**The whitelist comes from what the commit will contain, never from the working
+tree.** `_staged_canaries` reads the manifest from the index when it is staged
+and from `HEAD` when it is not, which is precisely the manifest the commit ends
+up with. Sourcing it from disk instead — as this did before review — let an
+**unstaged** edit widen the whitelist for content that *was* staged: declaring a
+secret as a tail without ever committing that declaration made the same secret
+pass inside a transcript. Nothing constrains an unreviewed working-tree file, so
+"synthetic by construction" was never true of one.
 
 Comments are not exempt, deliberately. Exempting them is the cheap way to quiet
 an illustrative path in the manifest header, and it buys that quiet by going
 blind to a real secret pasted into a comment, which is committed and public just
 the same. The header illustrates the path format with a declared canary instead.
-
-Two limits on that line, stated rather than papered over. A real random hex run
-typed into `entropy_tail` is indistinguishable from a synthetic one and would be
-whitelisted — the manifest is its own whitelist and no rule escapes that. And the
-whitelist is loaded from the manifest on **disk** while the bytes checked come
-from the index, so staging the manifest and then editing it compares one against
-the other. The common divergence fails closed: a canary declared only in the
-index reads as undeclared and blocks. The open direction can only hide a canary
-string, which is synthetic by construction. Left standing rather than fixed, and
-carried to #59 with the scope question.
+The cost is real and is stated with the rule in the manifest header: the manifest
+can never cite an external URL or hostname, because a comment naming this repo on
+GitHub or quoting a real documentation link fires the hostname rule.
 
 Deliberately noisy rather than clever. A false positive costs one
 `CANARY_GUARD_OVERRIDE=1`; a false negative is permanent and public.
@@ -79,8 +99,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from src.manifest import Canary
 from src.manifest import load as load_canaries
+from src.manifest import loads
+
+# The file that supplies the whitelist, and is itself in scope.
+MANIFEST = "canaries/manifest.yaml"
 
 # Which staged paths are checked, and the one deliberate way past a finding.
 # `git commit --no-verify` is too invisible to count as a decision. An inclusion
@@ -399,6 +425,24 @@ def check_staged(
     )
 
 
+def committed_canaries() -> tuple[Canary, ...]:
+    """The manifest as the commit will contain it — the index, never the disk.
+
+    `:path` is the index entry, which for a staged manifest is the new version
+    and for an untouched one is HEAD's. Either way it is what the commit ends up
+    with, so the whitelist and the content it is applied to come from the same
+    artefact. Reading the working tree instead let an **unstaged** edit widen the
+    whitelist for content that *was* staged — see the docstring.
+
+    An empty whitelist where the manifest is not in the index at all: no commit,
+    no declared canary, nothing legitimate to let through.
+    """
+    try:
+        return loads(_git("show", f":{MANIFEST}"))
+    except RuntimeError:
+        return ()
+
+
 # --------------------------------------------------------------------------- cli
 
 
@@ -418,25 +462,56 @@ def verdict(findings: tuple[Finding, ...], *, overridden: bool) -> str:
     )
 
 
-def main(argv: list[str]) -> int:
-    canaries = load_canaries()
-    paths = [a for a in argv if not a.startswith("-")]
-    findings = (
-        tuple(
-            finding
-            for path in paths
-            for finding in check_text(
-                Path(path).read_text(encoding="utf-8", errors="replace"), canaries, path=path
-            )
-        )
-        if paths
-        else check_staged(canaries)
+def unrunnable(reason: str, *, overridden: bool) -> str:
+    """The guard could not run at all — almost always an unloadable manifest.
+
+    Blocking is right: with no whitelist there is nothing to check against. But
+    it has to block the way a finding blocks, through a message that names the
+    override, rather than through a traceback whose only escape is `--no-verify`
+    — which this repo's own hook calls too invisible to count as a decision.
+
+    Before #51 an unloadable manifest was a rare coincidence. Now the manifest is
+    the file people are editing when the hook fires, and half-finished is its
+    normal intermediate state, so this path is ordinary rather than exceptional.
+    """
+    # The reason is somebody else's prose -- `manifest.validate()` writes em
+    # dashes -- and `verdict`'s ASCII rule applies to whatever this prints.
+    where = f"transcript-guard: cannot run -- {reason.encode('ascii', 'replace').decode()}"
+    if overridden:
+        return f"{where}\nAllowed because {OVERRIDE}=1 is set. Nothing was checked."
+    return (
+        f"{where}\nCommit blocked: with no canary manifest there is no whitelist, so "
+        f"nothing can be checked.\n"
+        f"Fix the manifest, or re-run the commit with {OVERRIDE}=1 to commit unchecked."
     )
+
+
+def _findings(paths: list[str]) -> tuple[Finding, ...]:
+    if not paths:
+        return check_staged(committed_canaries())
+    # Manual review reads the manifest off disk: the file named may be anywhere,
+    # including outside a repository, and there is no commit to agree with.
+    canaries = load_canaries()
+    return tuple(
+        finding
+        for path in paths
+        for finding in check_text(
+            Path(path).read_text(encoding="utf-8", errors="replace"), canaries, path=path
+        )
+    )
+
+
+def main(argv: list[str]) -> int:
+    overridden = os.environ.get(OVERRIDE) == "1"
+    try:
+        findings = _findings([a for a in argv if not a.startswith("-")])
+    except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
+        print(unrunnable(f"{type(exc).__name__}: {exc}", overridden=overridden), file=sys.stderr)
+        return 0 if overridden else 1
     for finding in findings:
         print(finding, file=sys.stderr)
     if not findings:
         return 0
-    overridden = os.environ.get(OVERRIDE) == "1"
     print(verdict(findings, overridden=overridden), file=sys.stderr)
     return 0 if overridden else 1
 

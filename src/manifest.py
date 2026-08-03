@@ -39,7 +39,17 @@ MARKER_SEPARATOR = "|"
 _FORMAT = re.compile(r"CANARY-[0-9A-F]{4}-([A-Z_]+)")
 # 8 hex digits is ~32 bits — a *manifest shape* rule, below which any sane
 # detector would miss the tail. Not a scrubber threshold; #6 picks its own.
-_TAIL = re.compile(r"[0-9a-f]{8,}")
+#
+# The ceiling is a safety rule, not a shape one (#51). `transcript_guard` builds
+# its whitelist from this file, so whatever validates here becomes invisible to
+# the guard in every file it checks. Lowercase hex is the native encoding of a
+# large class of real credentials, and 32, 40 and 64 hex characters — an HMAC
+# secret, a git SHA, a 256-bit key — are the common ones. Refusing them costs
+# nothing: every canary in the manifest uses a 16-character tail. It does not
+# make the whitelist safe, because a 16-hex real secret still validates; see the
+# module docstring in `src/transcript_guard.py` for what the whitelist does and
+# does not close.
+_TAIL = re.compile(r"[0-9a-f]{8,20}")
 _SLOT = re.compile(SLOT_PATTERN)
 # A marker's own first and last character, checked against the same class
 # `scoring._BOUNDARY` asserts around it. Applied to the reversed string for the
@@ -93,7 +103,16 @@ class Canary:
 
 def load(path: Path = DEFAULT_PATH) -> tuple[Canary, ...]:
     """Read, validate, and return the manifest's canaries."""
-    entries = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    return loads(path.read_text(encoding="utf-8"))
+
+
+def loads(text: str) -> tuple[Canary, ...]:
+    """The same, from text already in hand.
+
+    Split out for `transcript_guard`, which reads the manifest out of the git
+    index rather than off disk (#51) and so never has a path to hand it.
+    """
+    entries = yaml.safe_load(text) or []
     canaries = tuple(_build(entry, i) for i, entry in enumerate(entries))
     validate(canaries)
     return canaries
@@ -138,7 +157,9 @@ def validate(canaries: tuple[Canary, ...]) -> None:
         ):
             raise ValueError(
                 at + f"entropy_tail {c.entropy_tail!r} must be a quoted string, "
-                'either "" or 8+ lowercase hex digits'
+                'either "" or 8 to 20 lowercase hex digits. The ceiling keeps the '
+                "commonest real-credential hex lengths (32, 40, 64) out of the guard's "
+                "whitelist — invent a 16-digit tail rather than widening it"
             )
         if c.category in TAIL_REQUIRED_CATEGORIES and not c.entropy_tail:
             raise ValueError(

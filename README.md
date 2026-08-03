@@ -89,11 +89,22 @@ corpus has.
 The manifest is the interesting case, because it is *meant* to hold secret-shaped strings. The line
 is the whitelist plus `src/manifest.py`'s validation: a string passes only if the manifest declares
 it as a `canary_string`, an `entropy_tail`, or the planted value those two compose, **and** the
-declaration is canary-shaped — so a real key pasted into a canary field cannot legitimise itself, and
-everything else in the file, comments included, is read exactly as a transcript is. Comments are not
-exempt on purpose: skipping them would be the cheap way to quiet an illustrative path in the header,
-and it would go blind to the likeliest way a real value arrives. The header teaches the path format
-with a declared canary instead.
+declaration validates. Everything else in the file, comments included, is read exactly as a
+transcript is.
+
+That line is uneven, and the module docstring in `src/transcript_guard.py` is the authoritative
+account of where — read it before relying on this paragraph. In short: `canary_string` is closed, a
+non-hex tail is closed, and a **lowercase-hex tail is accepted on its face**, which is a real hole
+because hex is what a large class of real credentials look like. The tail length is capped at 20 so
+the 32/40/64-hex shapes most real hex credentials take cannot be declared, but 8-to-20 hex still
+validates and is still whitelisted — across every file in scope, since the same whitelist is applied
+to all of them.
+
+The whitelist is read from the **index**, never the working tree, so it is the manifest the commit
+will actually contain. Comments are not exempt on purpose: skipping them would be the cheap way to
+quiet an illustrative path in the header, and it would go blind to the likeliest way a real value
+arrives. The header teaches the path format with a declared canary instead, and pays for that by
+never being able to cite an external URL or hostname.
 
 **The layer that needs no opt-in is the test suite**: `uv run pytest` runs the guard over every file
 in scope, recursively, so an unscrubbed transcript or a real value in the manifest turns the suite
