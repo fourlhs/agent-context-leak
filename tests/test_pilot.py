@@ -693,15 +693,76 @@ NOISY = (
 )
 
 
-def test_a_noisy_fit_widens_the_span_while_a_tight_one_collapses_it():
-    """With every sample identical the fit is exact and the span collapses; with
-    scatter it opens, and a gate refuses a run that *may* overrun."""
+def test_the_fitted_interval_collapses_on_the_outcome_this_project_expects():
+    """Output proportional to length is the expected result, and there the fit
+    clamps at both ends and prints a zero-width interval. That reads as
+    'confidently bracketed' and means 'no interval was available' — which is the
+    whole reason the verdict is a bound instead."""
     tight = project(PAIR, SIZES)
-    assert tight.span[0] == pytest.approx(tight.span[1])
 
+    assert tight.candidates["fit -1 SE"] == pytest.approx(tight.candidates["fit +1 SE"])
+    assert tight.bound >= tight.cost  # the fit is one candidate, never the ceiling
+
+
+def test_the_bound_is_the_largest_cost_over_the_whole_clamped_family():
+    """`_clamp` confines every fitted elasticity to [0, 1], so F(0) and F(1) are
+    the endpoints of everything the code can produce. The bound needs no fit and
+    no standard error, and is never softer than the fit."""
+    extrapolation = project(PAIR, SIZES)
+
+    assert set(extrapolation.candidates) == {
+        "fit",
+        "fit -1 SE",
+        "fit +1 SE",
+        "e = 0.00",
+        "e = 1.00",
+    }
+    assert extrapolation.bound == max(extrapolation.candidates.values())
+    assert extrapolation.bound >= extrapolation.cost
+
+
+def test_the_bound_is_evaluated_rather_than_assumed_to_sit_at_one_end():
+    """Which endpoint is larger is a property of the corpus, not something this
+    module gets to declare. On a corpus where the pilot is the *short* end the
+    sign inverts, and the bound has to follow it."""
+    # In SIZES the pilot is the *short* end, so the char ratio is the larger one.
+    short_pilot = project(PAIR, SIZES)
+    # Here the two piloted transcripts are the corpus's longest, and it inverts.
+    long_pilot = project(PAIR, {"a": 1000, "b": 2000, "c": 100, "d": 100})
+
+    assert short_pilot.candidates["e = 1.00"] > short_pilot.candidates["e = 0.00"]
+    assert long_pilot.candidates["e = 0.00"] > long_pilot.candidates["e = 1.00"]
+    for extrapolation in (short_pilot, long_pilot):
+        assert extrapolation.bound == max(extrapolation.candidates.values())
+
+
+def test_a_noisy_fit_still_cannot_soften_the_bound():
+    """The fitted band is one candidate among five, never the verdict on its own."""
     noisy = project(NOISY, SIZES)
-    assert 0.3 < noisy.factors[THINKING].value / noisy.factors[CALLS].value  # not clipped
-    assert noisy.span[0] < noisy.cost < noisy.span[1]
+
+    assert noisy.candidates["fit -1 SE"] < noisy.cost < noisy.candidates["fit +1 SE"]
+    assert noisy.bound >= noisy.candidates["fit +1 SE"]
+    assert noisy.bound >= noisy.cost
+
+
+def test_a_fit_too_noisy_to_distinguish_the_endpoints_is_reported_as_noise():
+    """`sxx <= 0` fires only on *exactly* equal lengths; the condition that
+    actually matters is a lever arm too short relative to the scatter. Two
+    transcripts a hair apart fit `e` wildly and clamp silently."""
+    sizes = {"a": 1000, "b": 1053, "c": 3000, "d": 6000}
+    barely = (
+        _defender("a", 0, 40, 50, write=300),
+        _defender("a", 1, 160, 50, read=300),
+        _defender("b", 0, 300, 100, write=500),
+        _defender("b", 1, 100, 100, read=500),
+    )
+    extrapolation = project(barely, sizes)
+
+    # `notes` is exact here (every note the same length), so only the noisy fit
+    # is flagged — the flag tracks the fit's own scatter, not the lever arm alone.
+    assert {f.name for f in extrapolation.uninformative} == {THINKING}
+    assert extrapolation.factors[THINKING].measured  # a fit happened; it says nothing
+    assert abs(float(extrapolation.factors[THINKING].derivation.split()[1])) > 1.0
 
 
 def test_the_elasticity_is_clamped_to_a_plausible_range():
@@ -844,15 +905,43 @@ def test_the_report_refuses_a_run_that_does_not_fit(capsys):
     assert "claude-sonnet-5" in out  # the lever ladder, least damaging first
 
 
-def test_the_verdict_is_read_at_the_expensive_end_of_the_fit(capsys):
-    """A gate exists to refuse a run that *may* overrun, not to report the midpoint
-    of one that might."""
+def test_the_verdict_is_read_at_the_bound_and_not_at_the_fit(capsys):
+    """The one that matters. A budget between the fit and the bound must fail:
+    the fitted standard error is a repeatability interval and far too narrow to
+    be a safety margin, so it may not be what a run is launched on."""
     extrapolation = project(NOISY, SIZES)
-    between = (extrapolation.cost + extrapolation.span[1]) / 2
+    between = (extrapolation.candidates["fit +1 SE"] + extrapolation.bound) / 2
+    assert extrapolation.cost < between < extrapolation.bound
 
     assert report(NOISY, SIZES, budget=between) == 1
 
-    assert "OVER by" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "OVER by" in out
+    assert "read at the bound" in out
+
+
+def test_the_report_shows_every_candidate_the_bound_is_taken_over(capsys):
+    report(PAIR, SIZES)
+
+    out = capsys.readouterr().out
+    assert "conservative bound" in out
+    for label in ("fit", "fit -1 SE", "fit +1 SE", "e = 0.00", "e = 1.00"):
+        assert label in out
+    assert "<-- bound" in out
+
+
+def test_a_fit_that_says_nothing_makes_the_gate_report_non_zero(capsys):
+    sizes = {"a": 1000, "b": 1053, "c": 3000, "d": 6000}
+    barely = (
+        _defender("a", 0, 40, 50, write=300),
+        _defender("a", 1, 160, 50, read=300),
+        _defender("b", 0, 300, 100, write=500),
+        _defender("b", 1, 100, 100, read=500),
+    )
+
+    assert report(barely, sizes) == 1
+
+    assert "fit is noise, not a measurement" in capsys.readouterr().out
 
 
 def test_a_failed_note_makes_the_gate_report_non_zero(capsys):

@@ -41,6 +41,38 @@ output, above one that they produce superlinearly more; either is a finding in
 its own right rather than an input, and the clamp keeps the factor between the
 two bases this gate would otherwise have had to choose between by hand.
 
+## The verdict is a bound, not the fit
+
+**The fitted interval is not a safety margin and must not be used as one.** With
+two pilot transcripts the fit is *exact*, so the standard error propagated from
+each transcript's 15 samples answers only "if these same two transcripts were
+re-sampled, how far would the slope wobble". It captures no model
+misspecification, no content–length confounding, and no between-transcript
+variation — which at n=2 is the entire uncertainty. Monte Carlo over the real
+pilot lengths with `e = 0` true by construction puts the fitted slope's actual
+sd at 0.547 against a reported SE averaging 0.094: **6x narrow**, rising to 23x
+at a cleaner within-transcript CV. The understatement gets *worse* as the
+sampling gets cleaner, which is the exact inversion of what `±` means to a reader.
+Worse, on the outcome this project expects — output proportional to length — the
+fit clamps at both ends and prints a zero-width interval, which reads as
+"confidently bracketed" and means "no interval was available".
+
+So the budget comparison is `max` over the whole family the clamp can produce.
+`_clamp` confines every fitted elasticity to `[0, 1]`, and `F(0)` and `F(1)` are
+that interval's endpoints — so the bound needs no fit, no standard error and no
+clamp to exist, and is never softer than the fit. `BOUND_ELASTICITIES` holds the
+endpoints, `project` evaluates whole projections at each and takes the largest
+cost rather than assuming which end is larger, and the fit is evaluated
+alongside so the bound can never fall below it.
+
+The fit is still computed, still printed, and still the honest number for #17.
+It is simply not what the gate decides on.
+
+Note which half of the clamp is dangerous: on this corpus `F` decreases in `e`,
+so the **upper** clamp is conservative — a true `e = 1.5` projects 19% high and
+`e = 2.0` projects 44% high. It is the **lower** clamp that would under-project,
+and the bound is what removes its teeth.
+
 ## The input side, which is small but free to get right
 
 `input_tokens` on a defender call is the *post-breakpoint* remainder — C2's
@@ -149,6 +181,20 @@ BASES = {
 # Below zero means longer transcripts produce less; above one, superlinearly more.
 E_RANGE = (0.0, 1.0)
 
+# The endpoints of the family `_clamp` can produce, and therefore the bound the
+# verdict is read at. `F(0)` is the transcript count ratio and `F(1)` the
+# character ratio, so this needs no fit and no standard error — which is the
+# point, because the fit's standard error is a repeatability interval and far too
+# narrow to be a safety margin (see the module docstring).
+BOUND_ELASTICITIES = (0.0, 1.0)
+
+# An SE at least this wide makes `±1 SE` cover the whole `[0, 1]` family, so the
+# fit cannot tell a flat count from a proportional one and is reported as noise
+# rather than as a measurement. This is the check `sxx <= 0` cannot make: that
+# guard fires only on *exactly* equal lengths, while the condition that actually
+# matters is a lever arm too short relative to the scatter.
+UNINFORMATIVE_SE = 0.5
+
 # #10's layout predicts 14 reads per write for the defender (93%) and 2 per 3
 # turns for the attacker (67%). A third of the smaller only fires when caching is
 # substantially broken rather than merely imperfect.
@@ -183,6 +229,11 @@ class Factor:
     value: float
     derivation: str
     measured: bool = True
+    # False when the fit exists but its standard error is too wide to distinguish
+    # a flat count from a proportional one. Not a safety problem — the verdict is
+    # a bound over the whole family either way — but a fit that says nothing must
+    # not be printed as though it said something.
+    informative: bool = True
 
 
 @dataclass(frozen=True)
@@ -207,19 +258,34 @@ class Extrapolation:
     corpus_chars: int
     factors: dict[str, Factor]
     stages: dict[str, Projection]
-    # (cheap, expensive) over one standard error of each fitted elasticity. The
-    # verdict is read at the expensive end: a gate exists to refuse a run that
-    # *may* overrun, not to report the midpoint of one that might.
-    span: tuple[float, float]
+    # Every candidate the verdict is bounded over, label -> total cost: the fit,
+    # the fit shifted one standard error each way, and the endpoints of the family
+    # `_clamp` can produce. Evaluated, never assumed — which end is larger is a
+    # property of the corpus, not something this module gets to declare.
+    candidates: dict[str, float]
 
     @property
     def cost(self) -> float:
+        """The fitted projection. The honest central number, and not the verdict."""
         return sum(p.cost for p in self.stages.values())
+
+    @property
+    def bound(self) -> float:
+        """What the budget is compared against — see the module docstring.
+
+        Never below `cost`, because the fit is one of the candidates.
+        """
+        return max(self.candidates.values())
 
     @property
     def assumed(self) -> tuple[Factor, ...]:
         """Factors that fell back to an assumption instead of a measurement."""
         return tuple(f for f in self.factors.values() if not f.measured)
+
+    @property
+    def uninformative(self) -> tuple[Factor, ...]:
+        """Fits too noisy to distinguish a flat count from a proportional one."""
+        return tuple(f for f in self.factors.values() if f.measured and not f.informative)
 
 
 @dataclass(frozen=True)
@@ -465,7 +531,21 @@ def _fitted(
     piloted: Sequence[str],
     estimate: tuple[float, float] | None,
     shift: float,
+    override: float | None,
 ) -> Factor | None:
+    """One fitted factor, or `None` when there was nothing to fit.
+
+    `override` holds `e` at a named value for one of the bound's candidates, and
+    deliberately bypasses both the fit and the fallback: the bound is over every
+    elasticity the clamp *could* produce, whether or not this run managed to
+    measure one.
+    """
+    if override is not None:
+        return Factor(
+            name,
+            _elastic(sizes, piloted, override),
+            f"e held at {override:.2f} for the conservative bound",
+        )
     if estimate is None:
         return None
     e, se = estimate
@@ -474,6 +554,7 @@ def _fitted(
         name,
         _elastic(sizes, piloted, used),
         f"elasticity {e:+.2f} +/- {se:.2f}, used {used:.2f}; sum(L^e) corpus / pilot",
+        informative=se <= UNINFORMATIVE_SE,
     )
 
 
@@ -482,6 +563,7 @@ def _factors(
     piloted: Sequence[str],
     measurements: Measurements,
     shift: float = 0.0,
+    override: float | None = None,
 ) -> dict[str, Factor]:
     """Every multiplier, measured where the pilot supports it and flagged where not."""
     corpus_chars, pilot_chars = sum(sizes.values()), sum(sizes[t] for t in piloted)
@@ -516,8 +598,12 @@ def _factors(
     def fallback(name: str, why: str) -> Factor:
         return replace(calls, name=name, measured=False, derivation=f"{calls.derivation}; {why}")
 
-    thinking = _fitted(THINKING, sizes, piloted, _elasticity(measurements.output_tokens), shift)
-    notes = _fitted(NOTES, sizes, piloted, _elasticity(measurements.note_chars), shift)
+    thinking = _fitted(
+        THINKING, sizes, piloted, _elasticity(measurements.output_tokens), shift, override
+    )
+    notes = _fitted(
+        NOTES, sizes, piloted, _elasticity(measurements.note_chars), shift, override
+    )
     return {
         CALLS: calls,
         CHARS: chars,
@@ -568,8 +654,10 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
     rather than read off `PILOT`, so switching the pilot pair moves every factor
     with it and cannot leave a stale constant behind (#55).
 
-    `span` re-runs the whole projection with each fitted elasticity moved one
-    standard error either way. The verdict is read at the expensive end.
+    `candidates` re-runs the whole projection at the fit, at the fit shifted one
+    standard error each way, and at each endpoint of the family `_clamp` can
+    produce. The verdict is the largest of them — see the module docstring on why
+    the fitted interval is not a safety margin.
     """
     piloted = sorted({r.transcript for r in records if r.stage == defender.STAGE})
     if not piloted:
@@ -584,10 +672,17 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
     measured = _measurements(records, sizes)
     factors = _factors(sizes, piloted, measured)
     stages = _stages(records, factors)
-    ends = sorted(
-        sum(p.cost for p in _stages(records, _factors(sizes, piloted, measured, s)).values())
-        for s in (-1.0, 1.0)
-    )
+
+    def total(**kwargs) -> float:
+        candidate = _factors(sizes, piloted, measured, **kwargs)
+        return sum(p.cost for p in _stages(records, candidate).values())
+
+    candidates = {"fit": sum(p.cost for p in stages.values())}
+    candidates["fit -1 SE"] = total(shift=-1.0)
+    candidates["fit +1 SE"] = total(shift=1.0)
+    for e in BOUND_ELASTICITIES:
+        candidates[f"e = {e:.2f}"] = total(override=e)
+
     return Extrapolation(
         piloted=tuple(piloted),
         corpus=tuple(sorted(sizes)),
@@ -595,7 +690,7 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
         corpus_chars=sum(sizes.values()),
         factors=factors,
         stages=stages,
-        span=(ends[0], ends[1]),
+        candidates=candidates,
     )
 
 
@@ -758,10 +853,10 @@ def report(
 ) -> int:
     """Print the projection and return the gate's exit code.
 
-    Non-zero means **do not launch the full run**: the expensive end of the fit is
-    over budget, a note failed, a factor fell back to an assumption, a stage
-    drifted in model, effort or prompt, or a group barely read its cache. A gate
-    that exits 0 on an overrun is not a gate.
+    Non-zero means **do not launch the full run**: the conservative bound is over
+    budget, a note failed, a factor fell back to an assumption or fitted only
+    noise, a stage drifted in model, effort or prompt, or a group barely read its
+    cache. A gate that exits 0 on an overrun is not a gate.
     """
     extrapolation = project(records, sizes)
     conditions, samples = len(defender.CONDITIONS), defender.SAMPLES
@@ -785,16 +880,27 @@ def report(
         print(line)
     print(_span_note(extrapolation, sizes), end="")
 
-    low, high = extrapolation.span
-    over = high - budget
+    bound = extrapolation.bound
+    over = bound - budget
     verdict = f"OVER by {over:,.2f}" if over > 0 else f"fits, with {-over:,.2f} of headroom"
     # ASCII only, here and above: this prints to a console, and a cp1252 terminal
     # raises UnicodeEncodeError on the em dash the prose wants.
+    print(f"\nprojected {extrapolation.cost:,.2f} at the fitted elasticities.")
+    print(f"conservative bound {bound:,.2f}, the largest cost over the whole clamped family:")
+    for label, cost in extrapolation.candidates.items():
+        marker = "  <-- bound" if cost == bound else ""
+        print(f"  {label:<12}{cost:>10,.2f}{marker}")
     print(
-        f"\nprojected {extrapolation.cost:,.2f}, and {low:,.2f} to {high:,.2f} over one standard\n"
-        f"error of each fitted elasticity. Against a ~{budget:,.2f} budget, read at the\n"
-        f"expensive end: {verdict}"
+        "\n  The verdict is the bound, not the fit. With two pilot transcripts the fit is\n"
+        "  exact, so its standard error only answers 'how far would the slope wobble if\n"
+        "  these same two transcripts were re-sampled' -- it captures no confounding and\n"
+        "  no between-transcript variation, which at n=2 is the whole uncertainty. It runs\n"
+        "  ~6x narrow at a realistic within-transcript CV and ~23x narrow at a clean one,\n"
+        "  and it collapses to zero width on the outcome this project expects. The clamp\n"
+        "  confines every multiplier to F(e) over e in [0, 1], so the endpoints bound the\n"
+        "  family for free -- no fit, no standard error, never softer than the fit."
     )
+    print(f"\nAgainst a ~{budget:,.2f} budget, read at the bound: {verdict}")
     if over > 0:
         print(
             "levers, least damaging first: attacker effort medium -> low; control arm on a\n"
@@ -804,6 +910,12 @@ def report(
 
     problems = [
         f"{f.name} fell back to an assumption: {f.derivation}" for f in extrapolation.assumed
+    ]
+    problems += [
+        f"{f.name} fit is noise, not a measurement ({f.derivation}): +/-1 SE covers the "
+        "whole [0, 1] family, so the lever arm is too short relative to the scatter to "
+        "tell a flat count from a proportional one"
+        for f in extrapolation.uninformative
     ]
     problems += cache_warnings(rows)
     # The ladder's first rung is re-running at a lower effort, and `runs.exists()`
