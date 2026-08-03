@@ -25,7 +25,7 @@ a floor, so it is labelled one and the exit code is non-zero.
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.runs import RUNS, RunRecord, RunStore
+from src.runs import RUNS, RunRecord, RunStore, Usage
 
 # model -> (input $/MTok, output $/MTok). The one place prices live.
 PRICES: dict[str, tuple[float, float]] = {
@@ -47,6 +47,20 @@ CACHE_WRITE_MULTIPLIER = 1.25
 # Fields that must not vary within a stage — see the module docstring.
 PROVENANCE = ("model", "effort", "prompt_hash")
 
+# The one exception, and it is stage-specific. The **defender's** `prompt_hash` is
+# supposed to vary by condition — C2 appends its instruction, C1 and C3 share a
+# hash by construction — so checking it per stage fires on every real defender run,
+# and a warning that is always on is a warning nobody reads. It is checked within
+# (stage, condition) there instead.
+#
+# It must stay per-stage everywhere else. `attacker.prompt_hash()` takes no
+# condition at all, so there is nothing legitimate for it to vary with, and
+# `pilot.run` iterates condition-major within each transcript — an edit to
+# `prompts/attack.md` mid-run therefore lands cleanly on a condition boundary and
+# would be **invisible** to a per-condition check. Narrowing it for every stage
+# was a real hole, opened while fixing the defender's false positive.
+BY_CONDITION = {"defender": ("prompt_hash",)}
+
 
 @dataclass(frozen=True)
 class StageTotals:
@@ -58,20 +72,31 @@ class StageTotals:
     cost: float
 
 
-def cost(record: RunRecord, prices: dict[str, tuple[float, float]] = PRICES) -> float:
-    """Dollars for one call. Raises on an unpriced model rather than counting
-    it as free — a silent zero is a budget check that passes for the wrong
-    reason."""
-    if record.model not in prices:
-        raise ValueError(f"{record.model!r} is not in PRICES; add it before reporting")
-    rate_in, rate_out = prices[record.model]
-    u = record.usage
+def price(
+    usage: Usage, model: str, prices: dict[str, tuple[float, float]] = PRICES
+) -> float:
+    """Dollars for `usage` on `model`. Raises on an unpriced model rather than
+    counting it as free — a silent zero is a budget check that passes for the
+    wrong reason.
+
+    Takes counts rather than a record so that a *projected* usage prices through
+    exactly these rates: #14 scales the pilot's measured tokens and must not
+    carry a second copy of the cache multipliers to do it.
+    """
+    if model not in prices:
+        raise ValueError(f"{model!r} is not in PRICES; add it before reporting")
+    rate_in, rate_out = prices[model]
     billed_input = (
-        u.input_tokens
-        + u.cache_read_input_tokens * CACHE_READ_MULTIPLIER
-        + u.cache_creation_input_tokens * CACHE_WRITE_MULTIPLIER
+        usage.input_tokens
+        + usage.cache_read_input_tokens * CACHE_READ_MULTIPLIER
+        + usage.cache_creation_input_tokens * CACHE_WRITE_MULTIPLIER
     )
-    return (billed_input * rate_in + u.output_tokens * rate_out) / 1_000_000
+    return (billed_input * rate_in + usage.output_tokens * rate_out) / 1_000_000
+
+
+def cost(record: RunRecord, prices: dict[str, tuple[float, float]] = PRICES) -> float:
+    """Dollars for one call."""
+    return price(record.usage, record.model, prices)
 
 
 def _totals(records: tuple[RunRecord, ...]) -> StageTotals:
@@ -100,8 +125,17 @@ def summarise(records: tuple[RunRecord, ...]) -> dict[str, StageTotals]:
     return {stage: _totals(rs) for stage, rs in _by_stage(records).items()}
 
 
+def _mixed(label: str, records: tuple[RunRecord, ...], fields: tuple[str, ...]) -> list[str]:
+    warnings = []
+    for field in fields:
+        values = sorted({getattr(r, field) for r in records})
+        if len(values) > 1:
+            warnings.append(f"{label} mixes {field}: {', '.join(values)}")
+    return warnings
+
+
 def provenance_warnings(records: tuple[RunRecord, ...]) -> list[str]:
-    """One line per stage that holds more than one value of a provenance field.
+    """One line per group that holds more than one value of a provenance field.
 
     `exists()` keys on (stage, condition, transcript, sample), so relaunching
     after changing the prompt, the model, or the effort keeps every completed
@@ -109,13 +143,21 @@ def provenance_warnings(records: tuple[RunRecord, ...]) -> list[str]:
     `medium`, comes in hot, someone applies escalation lever 1 and relaunches at
     `low`. Nothing errors, `runs/` quietly holds both, #13 aggregates across
     them, and the re-measured cost lands low — the reassuring direction.
+
+    Everything is checked across a whole stage except where `BY_CONDITION` says
+    otherwise, which today is the defender's `prompt_hash` and nothing else.
     """
     warnings = []
     for stage, rs in _by_stage(records).items():
-        for field in PROVENANCE:
-            values = sorted({getattr(r, field) for r in rs})
-            if len(values) > 1:
-                warnings.append(f"{stage} mixes {field}: {', '.join(values)}")
+        conditional = BY_CONDITION.get(stage, ())
+        warnings += _mixed(stage, rs, tuple(f for f in PROVENANCE if f not in conditional))
+        if not conditional:
+            continue
+        by_condition: dict[str, list[RunRecord]] = {}
+        for r in rs:
+            by_condition.setdefault(r.condition, []).append(r)
+        for condition, group in sorted(by_condition.items()):
+            warnings += _mixed(f"{stage}/{condition or '-'}", tuple(group), conditional)
     return warnings
 
 

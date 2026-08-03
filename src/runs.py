@@ -68,6 +68,12 @@ class RunRecord:
     usage: Usage
     git_sha: str
     created_at: str  # ISO 8601, supplied by the caller
+    # Why the stage stopped. Computed at every call site and, before #14, thrown
+    # away: a defender refusal then left no trace anywhere, because the record it
+    # would have appeared on was never written. Defaulted, so records written
+    # before it existed still load. The attacker's per-turn reasons stay in
+    # `raw_output`; this is the one that ended the stage.
+    stop_reason: str = ""
     # C3's pre-scrub generation; "" wherever there is nothing else to keep.
     # `output` is always the text that leaves the stage — what the attacker
     # sees — so #11 is unaffected by this field existing. Defaulted, so records
@@ -155,6 +161,27 @@ class RunStore:
             except ValueError:
                 unreadable.append(path)
         return tuple(records), tuple(unreadable)
+
+
+def failed(record: RunRecord) -> bool:
+    """Whether a stored record logs a failure rather than a result.
+
+    One predicate, here rather than once per stage, because it now gates a
+    **denominator**: `aggregate` drops a failed defender record out of #13's note
+    set entirely, so two copies drifting apart would move every rate at once and
+    nothing would say so. The defender, the attacker and the control arm all
+    write the same `{"failed": ...}` shape.
+
+    The type guard is not decoration. `json.loads` returns whatever the document
+    says: a bare `null` makes `"failed" in data` raise `TypeError`, and the
+    perfectly legal document `"failed"` — a JSON *string* — would answer True and
+    silently delete a real note from the denominator.
+    """
+    try:
+        data = json.loads(record.output)
+    except ValueError:
+        return False
+    return isinstance(data, dict) and "failed" in data
 
 
 def git_sha(repo: Path = RUNS.parent) -> str:

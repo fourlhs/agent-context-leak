@@ -76,7 +76,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from src.runs import RunRecord, RunStore, Usage
+from src.runs import RunRecord, RunStore, Usage, failed
 
 PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -415,14 +415,6 @@ def _failure_records(failure: AttackFailure) -> tuple[str, str]:
     return output, _turns_text(failure.turns, failure.stop_reasons)
 
 
-def failed(record: RunRecord) -> bool:
-    """Whether a stored record logs a failure rather than a result."""
-    try:
-        return "failed" in json.loads(record.output)
-    except ValueError:
-        return False
-
-
 def run(
     note_text: str,
     transcript: str,
@@ -460,7 +452,7 @@ def run(
     if existing is not None and not failed(existing):
         return None  # Resume must not re-call the API.
 
-    def record(output: str, raw: str, usage: Usage) -> Path:
+    def record(output: str, raw: str, usage: Usage, stops: Sequence[str]) -> Path:
         return store.write(
             RunRecord(
                 stage=stage,
@@ -474,6 +466,10 @@ def run(
                 usage=usage,
                 git_sha=git_sha,
                 created_at=created_at,
+                # The reason the *ladder* ended. Every turn's own reason stays in
+                # `raw_output`, where #15 reads them; this is the column #14 and
+                # the defender's records share.
+                stop_reason=stops[-1] if stops else "",
                 raw_output=raw,
             )
         )
@@ -483,9 +479,9 @@ def run(
     except AttackFailure as failure:
         # Log the spend, then let the caller see the failure. Raising first would
         # drop up to three billed calls out of the budget the pilot gate reads.
-        record(*_failure_records(failure), failure.usage)
+        record(*_failure_records(failure), failure.usage, failure.stop_reasons)
         raise
-    return record(*_records(result), result.usage)
+    return record(*_records(result), result.usage, result.stop_reasons)
 
 
 def main(argv: list[str]) -> int:

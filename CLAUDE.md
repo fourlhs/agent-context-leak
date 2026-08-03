@@ -13,8 +13,11 @@ guarantee met (#50). Not yet built: the C3 scrubber (#6, in review), the recorde
 rubric and its blind-grading harness are in (#15); the grades themselves wait on a run, which is the
 point — the rubric is registered before there is anything to grade.
 
-Next is **#14, the pilot gate** — the first thing here that spends money, and a hard stop until it
-reports a measured number.
+**#14, the pilot gate, is built and unrun.** `src/pilot.py` makes the calls, reads the measured
+usage back out of `runs/`, projects it to the full corpus and compares it to budget — all of it
+exercised against fake clients, none of it yet against a model. `python -m src.pilot` reports and
+spends nothing; `--run` is the only path that calls one. That run is the next thing to happen here
+and the first thing that costs money.
 
 Sections below describe intent; update them as code lands, and treat a stale status line here as a
 bug.
@@ -286,6 +289,7 @@ src/
   defender.py              distillation, C1/C2/C3      [calls a model]
   attacker.py              note-only adversary          [calls a model]
   control.py               guess-rate floor: strip a note, net T3   [runs the attacker]
+  pilot.py                 #14's gate: run, project, compare to budget   [--run calls models]
   aggregate.py             runs/ -> results/*.csv, exposure-conditioned — no API
   grading.py               T3 location: blind queue, unblinding, agreement — no API
   transcript_guard.py      refuses a staged unscrubbed transcript (#22) or a real
@@ -468,9 +472,66 @@ Order-of-magnitude estimate, both agents on Opus 5 at `medium` effort:
 and thinking volume — thinking is on by default on Opus 5 and billed as output, and it is the
 largest single term in the attacker cost. At default (`high`) effort the attacker roughly doubles.
 
-**Pilot gate, non-negotiable:** run 2 transcripts × 3 conditions × 5 samples (30 defender calls plus
-their attacker turns), read the *measured* usage out of `runs/`, multiply by 9, and compare to budget
-before launching the full run. Do not discover the overrun at 11pm.
+**Pilot gate, non-negotiable:** `python -m src.pilot --run` — 2 transcripts × 3 conditions × 5
+samples (30 defender calls plus their attacker turns and their control twins), read the *measured*
+usage out of `runs/`, project it to the full corpus, and compare to budget before launching the full
+run. Do not discover the overrun at 11pm. `python -m src.pilot` reports off `runs/` and calls
+nothing; `--run` is the only path that spends. The gate exits non-zero on an overrun, a note that
+failed, or a condition that never read the cache — a gate that exits 0 on an overrun is not a gate.
+
+**Output tokens are the bill, so that is where the projection's precision goes.** The defender's
+entire input side is bounded above by ~$3.22 — 270 calls over a ~2,388-token prompt at full price —
+and about $0.57 once #10's prefix is hitting. Thinking bills at $25/MTok, so defender output is ~97%
+of the defender line and the attacker and control arms are output-dominated too. A projection that
+gets the input side exactly right and hand-waves the output term has aimed its precision at ~1% of
+the budget.
+
+**The multiplier is fitted, never named (#55).** "Multiply by 9" was wrong for the pair this gate
+used to pilot: the corpus is bimodal — sixteen transcripts at 6,052–7,021 chars, two at 11,404 and
+13,076 — and `24,480 × 9 = 220,320` against a corpus of `127,287` overstates the defender's *input*
+bill by 73%. But the deeper problem was that a flat count on the **output** term asserts, silently,
+that per-call output does not depend on transcript length. Let `e` be the elasticity of a quantity to
+transcript length; the honest multiplier is `F(e) = Σ L_i^e over the corpus / Σ L_j^e over the
+pilot`, and **`F(0)` is the transcript count ratio while `F(1)` is the character ratio** — the two
+multipliers this gate used to hardcode are the endpoints of the one it now fits. `e` is measured by
+regressing log mean output on log transcript length, clamped to `[0, 1]`, and reported with a
+standard error; the verdict is read at the expensive end of that interval, because a gate exists to
+refuse a run that *may* overrun. Two elasticities are fitted, because the defender's output follows
+the transcript it reads while the attacker and the control arm read a *note* and follow note length.
+
+**`PILOT` therefore spans the corpus, shortest and longest.** The fits need a lever arm, and so does
+the prefix solve. A pair at one end of the range degrades all three factors to assumptions — which
+the report labels `[ASSUMED, not measured]` and the gate exits non-zero on, rather than letting an
+assumption pass as a measurement. Piloting at the *median* was considered and rejected: it would
+have moved the count-scaled error from +73% to −10%, trading a conservative bias for an
+anti-conservative one on the term that decides the verdict.
+
+**One term follows neither basis, and is solved instead.** #10 caches the note-format spec
+*together* with the transcript, so a cached prefix is `S + k·L` — a count-scaled constant plus a
+chars-scaled variable. Two pilot transcripts of different lengths are two equations in two unknowns,
+so `S` and `k` come out of the measured cache writes and the prefix factor follows exactly.
+Meanwhile `input_tokens` on a defender call is the *post-breakpoint* remainder and is a per-call
+constant, so it scales by count. `BASES` is the whole rule, term by term and stage by stage, and a
+stage missing from it raises rather than defaulting to a basis nobody chose. The pilot's own share is
+read off the run records, never off a constant, so changing which transcripts are piloted moves every
+factor with it.
+
+**Cache is reported per condition *and* per transcript, never pooled, on a ratio floor.** The
+attacker's prefix is the note, so its behaviour is a property of the condition: C3's scrubbed notes
+are the shortest artefacts in the pipeline and the ones that can fall under Opus 5's 512-token
+minimum. The defender's prefix is the *transcript*, so condition rows cannot see it — one transcript
+caching perfectly while another never caches shows three identical, healthy-looking condition rows,
+and #14's actual check ("non-zero after the first call per transcript") goes unanswered. The
+threshold is a fraction of the input side, not `read == 0`: #10's layout predicts 14 reads per write,
+so a cache limping along at 1% is as broken as one at 0% and used to be silent.
+
+**A refused note costs a sample, not the run.** Opus 5 ships elevated cyber safeguards and this
+corpus is `rotate_payments_key`, `refund_auth_header_audit` and `.env` secrets, so a defender refusal
+is live. It writes a record carrying what it billed and the gate collects it and carries on —
+`defender.Refused` and `defender.Truncated` are separate classes precisely so #14 can survive one and
+stop on the other, because a truncated note says `MAX_TOKENS` is wrong for the corpus. That record
+carries `"failed"` and no note, and `aggregate` filters it: scored as a note it would find no canary,
+read clean, and sit in every exposure-conditioned denominator anyway.
 
 Levers if the pilot comes in hot, in order: drop attacker effort to `low` → control arm on a
 stratified subset → n from 5 to 3 (cheapest to do, worst for the error bars) → attacker to
