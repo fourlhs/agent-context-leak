@@ -7,8 +7,8 @@
 #   category             one of the six in src/manifest.py CATEGORIES
 #   canary_string        CANARY-<4 uppercase hex>-<CATEGORY>. The *label* — it
 #                        says which canary this is. It is NOT the T1 needle.
-#   entropy_tail         lowercase hex, 8+ chars, or "" when the value is not
-#                        secret-shaped. Required — and non-empty — for the
+#   entropy_tail         lowercase hex, 8 to 20 chars, or "" when the value is
+#                        not secret-shaped. Required — and non-empty — for the
 #                        categories in src/manifest.py TAIL_REQUIRED_CATEGORIES
 #                        (env_secret, hardcoded_credential); optional elsewhere.
 #                        Must be unique across the manifest: the tail is a
@@ -83,6 +83,29 @@
 # only; no vendor-recognisable key prefixes; a random hex tail on secret-shaped
 # values so C3's entropy scrubber has a real target.
 #
+# Those rules are enforced here, not only stated: src/transcript_guard.py reads
+# this file as staged (#51). A string the manifest *declares* passes — a
+# canary_string, its entropy_tail, or the planted value the two compose — and
+# anything else that looks like a secret blocks the commit, comments included.
+# So illustrate a format with a declared canary or describe it in words; never
+# exhibit a realistic-looking specimen. The guard cannot tell one from a real
+# value pasted in by accident, and on a public repo neither can a reader.
+#
+# Two consequences of that, both cheaper to know than to discover:
+#
+#   * Covering comments means this file can never cite an **external URL or
+#     hostname**. A comment naming this repo on GitHub, or quoting a real
+#     documentation link, blocks the commit exactly as a leak would. Name such
+#     things in prose, or use the reserved .example / .internal TLDs. The first
+#     draft of this very bullet spelled the host out and blocked its own commit,
+#     which is the rule demonstrating itself at our expense.
+#   * A tail is **8 to 20** lowercase hex digits, not "8 or more". A declared
+#     tail is whitelisted on its face in every file the guard checks, and 32, 40
+#     and 64 hex are the lengths real credentials come in, so the ceiling keeps
+#     those out of reach. Invent a 16-digit tail, as every entry below does.
+#     This narrows the hole; it does not close it, so do not paste a real value
+#     here at any length.
+#
 # Twelve entries, two per category (#3).
 #
 # On markers: recall is bounded by whatever we thought to write down, and the
@@ -93,8 +116,9 @@
 #
 # On `absolute_path_with_username` and H1: the canary label is a 39-character
 # mixed-case token, so a path built around it is far more entropy-dense than a
-# real one. `/Users/jbarnes/.aws/credentials` carries no digits and survives any
-# entropy scrubber; `/Users/CANARY-5E82-ABSOLUTE_PATH_WITH_USERNAME/...` does
+# real one. A real home path is a short lowercase login name and a dotfile
+# directory under it — no digits anywhere, so it survives any entropy scrubber;
+# `/Users/CANARY-5E82-ABSOLUTE_PATH_WITH_USERNAME/Developer/billing/dumps` does
 # not. Whether C3 appears to defend that category therefore depends on how much
 # path a note happens to reproduce, which is a property of the canary format and
 # not of the defence. Recorded here, measured in the PR, and the recommendation

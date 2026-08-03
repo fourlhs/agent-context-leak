@@ -4,7 +4,14 @@ from collections import Counter
 import pytest
 import yaml
 
-from src.manifest import CATEGORIES, DEFAULT_SLOT, TAIL_REQUIRED_CATEGORIES, Canary, load
+from src.manifest import (
+    CATEGORIES,
+    DEFAULT_SLOT,
+    TAIL_REQUIRED_CATEGORIES,
+    Canary,
+    _TAIL,
+    load,
+)
 
 VALID = {
     "id": "env_secret_01",
@@ -145,11 +152,25 @@ def test_rejects_context_missing_the_tail(tmp_path):
         "nothexxx",  # right length, not hex
         None,  # a bare `entropy_tail:` in YAML
         12345678,  # an all-digit tail written unquoted
+        "a3f5e91c7b04d2685fa1c30e9b7d48f2",  # 32 hex: an HMAC secret
+        "9f2c1ab73de604815c0af92b7d36e18a4c50b9f7",  # 40 hex: a git SHA
+        "c1" * 32,  # 64 hex: 256 bits of key material
     ],
 )
 def test_rejects_malformed_entropy_tail(tmp_path, tail):
     with pytest.raises(ValueError, match="entropy_tail"):
         load(write(tmp_path, entry(entropy_tail=tail)))
+
+
+def test_the_tail_ceiling_is_a_safety_rule_not_a_shape_one():
+    """Why 20 and not "8 or more" (#51). `transcript_guard` builds its whitelist
+    from this file, so anything that validates here goes invisible to the guard in
+    *every* file it checks. The ceiling refuses the hex lengths real credentials
+    actually come in; it does not make the whitelist safe, because a 16-hex real
+    secret still validates. Pinned so the bound cannot drift back without someone
+    reading that sentence."""
+    assert _TAIL.pattern == r"[0-9a-f]{8,20}"
+    assert all(len(c.entropy_tail) <= 20 for c in load() if c.entropy_tail)
 
 
 def test_tail_required_categories_are_pinned():

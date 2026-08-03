@@ -1,16 +1,19 @@
-"""Tests for the staged-transcript guard.
+"""Tests for the staged-value guard.
 
 Two failure modes matter and they pull in opposite directions. A guard that fires
-on our own committed corpus is switched off within a day and protects nothing, so
-the corpus is asserted clean. A guard tuned until it fires on nothing is the same
-outcome with better manners, so every rule is asserted against a planted negative
-and against a whole realistic transcript.
+on our own committed files is switched off within a day and protects nothing, so
+everything in scope is asserted clean. A guard tuned until it fires on nothing is
+the same outcome with better manners, so every rule is asserted against a planted
+negative and against a whole realistic document.
 
-**The realistic transcript is the acceptance test.** An earlier revision passed
+**The realistic documents are the acceptance tests.** An earlier revision passed
 every isolated example below and still found nothing in a session written the way
 a session is actually written, because two rules were dead on JSON — the corpus's
-only format. Isolated samples cannot catch that; a document can. It is built with
-`json.dumps`, so its escaping is exactly what a real file would hold.
+only format. Isolated samples cannot catch that; a document can. The transcript is
+built with `json.dumps`, so its escaping is exactly what a real file would hold,
+and the manifest one plants its values into the committed manifest itself — zero
+findings is also what an inert guard returns, so "the manifest is clean" says
+nothing until the same file is shown to go dirty (#51).
 
 Every secret invented here is fake and shaped nothing like a canary. The vendor
 samples are split across two literals and joined at runtime: GitHub's own push
@@ -20,10 +23,13 @@ protection rejected this file when they were contiguous.
 import ast
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
+from src.manifest import loads, validate
 from src.transcript_guard import (
     OVERRIDE,
     PLACEHOLDER,
@@ -31,14 +37,22 @@ from src.transcript_guard import (
     Finding,
     check_staged,
     check_text,
+    committed_canaries,
     declared,
     main,
     redact,
 )
+from src.transcript_guard import MANIFEST as MANIFEST_IN_REPO
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "transcript_guard.py"
-TRANSCRIPTS = ROOT / "transcripts"
+MANIFEST = ROOT / "canaries" / "manifest.yaml"
+
+# The staged-path tests below build their paths from `SCOPE`, so they follow it
+# anywhere — including to a directory nothing is ever committed to, which is a
+# guard that inspects nothing and passes. The literal pin is the anchor that
+# stops that being silent.
+IN_SCOPE = SCOPE[0]
 
 HOSTILE = "SESSION_TOKEN=8f14e45fceea167a5a36dedd4bea2543  # /Users/jbarnes on grafana.acme.io\n"
 CLEAN = "the refund path is in app.py and the note says nothing else\n"
@@ -106,15 +120,30 @@ def test_the_checker_catches_a_hostile_sample(canaries):
     assert check_text(HOSTILE, canaries)
 
 
-# --- the committed corpus stays clean ----------------------------------------
+# --- the committed files in scope stay clean ---------------------------------
+
+# Derived from `SCOPE` rather than listed, so widening the guard widens this
+# assertion in the same commit. `rglob`, not `iterdir`: the hook's scope is the
+# whole subtree, and a test that only walked the top level would disagree with it
+# about what is guarded.
+GUARDED = sorted(p for prefix in SCOPE for p in (ROOT / prefix).rglob("*") if p.is_file())
 
 
-@pytest.mark.parametrize("path", sorted(p for p in TRANSCRIPTS.rglob("*") if p.is_file()))
-def test_committed_corpus_is_clean(path, canaries):
-    """`rglob`, not `iterdir`: the hook's scope is the whole subtree, and a test
-    that only walked the top level would disagree with it about what is guarded."""
+@pytest.mark.parametrize("path", GUARDED, ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_committed_files_in_scope_are_clean(path, canaries):
     findings = check_text(path.read_text(encoding="utf-8"), canaries, path=path.name)
     assert findings == (), f"{path.name}: {[str(f) for f in findings]}"
+
+
+def test_the_manifest_and_the_corpus_are_both_covered():
+    """Two ways the assertion above goes quiet without going red. A `SCOPE` prefix
+    pointing at nothing — a typo, a renamed directory — leaves it passing over an
+    empty parametrisation; and narrowing `SCOPE` drops a whole file out of it. The
+    manifest is named rather than left to follow from a constant, because it is the
+    file #51 exists for."""
+    for prefix in SCOPE:
+        assert [p for p in GUARDED if p.is_relative_to(ROOT / prefix)], f"{prefix} is empty"
+    assert MANIFEST in GUARDED
 
 
 def test_every_declared_canary_is_clean(canaries):
@@ -206,6 +235,178 @@ def test_a_realistic_unscrubbed_transcript_is_caught(name, canaries):
     assert lines, f"{name} is not in the document"
     findings = check_text(UNSCRUBBED, canaries, path="realistic.json")
     assert [f for f in findings if f.line in lines], f"{name} passed clean"
+
+
+# --- the other acceptance test: the manifest, which is meant to hold secrets ---
+#
+# The manifest is *supposed* to carry secret-shaped strings — that is what a
+# canary is — so the guard needs a line between one the file declares and one
+# somebody pasted. That line is `redact()` plus `manifest.validate()`; these two
+# blocks assert it from both sides, because a guard correct on only one of them
+# is either noise or a decoration.
+
+MANIFEST_TEXT = MANIFEST.read_text(encoding="utf-8")
+# Everything above the first entry. The header's illustrations have to be pinned
+# against *this*, not the whole file: the canary contexts below legitimately
+# contain the same strings, so a whole-file needle stays green when the paragraph
+# it claims to pin is deleted outright.
+HEADER = MANIFEST_TEXT[: MANIFEST_TEXT.index("- id:")]
+
+# Anchor -> the same text with a real value pasted in -> the value, and the rule
+# that must fire on it. The places are the ones an author working #3 would
+# actually paste into: a header comment, a canary's `context`, a
+# `referential_markers` entry, a `target_file`.
+PASTED = {
+    "home_directory_in_a_header_comment": (
+        "# Twelve entries, two per category (#3).",
+        "# Twelve entries, two per category (#3). Drafted from /Users/jbarnes/notes.md.",
+        "/Users/jbarnes",
+        "home_directory",
+    ),
+    "vendor_prefix_in_a_context": (
+        "PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61",
+        "PAYMENTS_API_KEY=CANARY-7F3A-ENV_SECRET-9c4e1baf72d0af61\n"
+        "    # was AKIA" + "IOSFODNN7EXAMPLE before we invented one",
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        "vendor_prefix",
+    ),
+    "credential_shape_in_a_context": (
+        "PAYMENTS_WEBHOOK_SECRET=CANARY-4D71-ENV_SECRET-3ba7e91c05df84a2",
+        "PAYMENTS_WEBHOOK_SECRET=CANARY-4D71-ENV_SECRET-3ba7e91c05df84a2\n"
+        '    db_password: "Tr0ub4dor"',
+        "Tr0ub4dor",
+        "credential_shape",
+    ),
+    "hostname_in_a_context": (
+        "https://CANARY-A3F5-INTERNAL_URL.audit.internal/v1/events",
+        "https://grafana.acme-corp.com/v1/events",
+        "grafana.acme-corp.com",
+        "hostname",
+    ),
+    "entropy_in_a_referential_marker": (
+        "    - AUDIT_SINK_URL",
+        "    - XkQvbnZmxTdwoLpRfhaQzNbcweRtyu",
+        "XkQvbnZmxTdwoLpRfhaQzNbcweRtyu",
+        "entropy",
+    ),
+    "home_directory_in_a_target_file": (
+        "  target_file: requirements.txt",
+        "  target_file: /home/nikos/scratch/requirements.txt",
+        "/home/nikos",
+        "home_directory",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PASTED))
+def test_a_real_value_pasted_into_the_manifest_is_caught(name, canaries):
+    """The proof that the guard *reaches* the manifest, and it has to be made in
+    the manifest: the committed file scores zero, and zero is also what a guard
+    that never opened it returns.
+
+    Asserted on the planted line **and against the named rule**, so one loud rule
+    cannot stand in for five dead ones. Checking only that *something* fired was
+    the earlier version of this test and it would have passed with four of the
+    five rules deleted, which is the #22 defect one level up.
+    """
+    anchor, replacement, secret, rule = PASTED[name]
+    assert MANIFEST_TEXT.count(anchor) == 1, f"{name}: the anchor is no longer unique"
+    text = MANIFEST_TEXT.replace(anchor, replacement)
+    lines = [i for i, line in enumerate(text.splitlines(), 1) if secret in line]
+    findings = check_text(text, canaries, path="manifest.yaml")
+    on_the_line = [f for f in findings if f.line in lines]
+    assert on_the_line, f"{name} passed clean"
+    assert {f.rule for f in on_the_line} == {rule}
+
+
+def test_a_manifest_comment_is_not_exempt(canaries):
+    """Named so it cannot be traded away quietly. Skipping comment lines is the
+    cheap fix for the header's path illustration, and it buys that quiet by going
+    blind to the likeliest way a real value arrives — pasted into a note to self,
+    committed and public exactly like the rest of the file. The header teaches the
+    path format with a declared canary instead."""
+    assert check_text("# e.g. /Users/jbarnes/.aws/credentials\n", canaries)
+    assert check_text("#   the old value was sk_live" + "_4eC39HqLyjWDarjtT1zdp7dc\n", canaries)
+
+
+def test_the_manifest_header_teaches_the_path_format_without_a_specimen():
+    """The illustration that made this file unguardable (#22, #51). Pinned by its
+    absence *within the header*, because the declared path also appears in
+    `absolute_path_with_username_01`'s context, and a whole-file needle would stay
+    green with this paragraph deleted."""
+    assert "/Users/jbarnes" not in MANIFEST_TEXT
+    assert "/Users/CANARY-5E82-ABSOLUTE_PATH_WITH_USERNAME" in HEADER
+
+
+def test_the_manifest_header_states_the_authoring_rule():
+    """The normative paragraph, not just its effect. Deleting it leaves every
+    other test green while the next author loses the only warning that a realistic
+    specimen -- or an external hostname -- blocks their commit."""
+    assert "src/transcript_guard.py" in HEADER
+    assert "comments included" in HEADER
+    assert "never" in HEADER and "specimen" in HEADER
+    # The two costs, stated where the person paying them reads. Both, not either:
+    # an `or` here let a mutant delete one of them and stay green.
+    assert "external URL" in HEADER and "hostname" in HEADER
+    # And the tail ceiling with the caveat attached. Asserting the bound alone is
+    # satisfied by the field documentation higher up, which states the rule
+    # without stating that it is only a narrowing -- the sentence that stops a
+    # reader taking the ceiling for a fix is the one worth pinning.
+    assert "8 to 20" in HEADER and "does not close it" in HEADER
+
+
+def test_a_non_hex_secret_cannot_be_laundered_by_declaring_it(canaries):
+    """One side of the line, and **only** as far as `validate()` actually reaches.
+    The whitelist is drawn from the very file being checked, so its width is
+    `validate()`'s width: a canary-shaped label and a hex-shaped tail. Vendor keys
+    and mixed-case blobs are refused. Lowercase hex is not — see the test below,
+    which pins the hole rather than letting this one imply it is closed."""
+    c = canaries[0]
+    for bad in (
+        replace(c, canary_string="sk_live" + "_4eC39HqLyjWDarjtT1zdp7dc"),
+        replace(c, canary_string="AKIA" + "IOSFODNN7EXAMPLE"),
+        replace(c, entropy_tail="XkQvbnZmxTdwoLpRfhaQzNbcweRtyu"),
+        replace(c, entropy_tail="9C4E1BAF72D0AF61"),  # uppercase hex
+    ):
+        with pytest.raises(ValueError):
+            validate((bad,))
+
+
+@pytest.mark.parametrize(
+    "tail, laundered",
+    [
+        ("a3f5e91c7b04d2685fa1c30e9b7d48f2", False),  # 32 hex: an HMAC secret
+        ("9f2c1ab73de604815c0af92b7d36e18a4c50b9f7", False),  # 40 hex: a git SHA
+        ("c1" * 32, False),  # 64 hex: 256 bits of key material
+        ("a3f5e91c7b04d268", True),  # 16 hex: every canary here, and still open
+    ],
+)
+def test_a_hex_tail_is_whitelisted_on_its_face_up_to_the_length_ceiling(tail, laundered):
+    """**The hole, pinned as a hole.** Lowercase hex is the native encoding of a
+    large class of real credentials and nothing here distinguishes a synthetic run
+    from a stolen one, so a declared tail is whitelisted on its face -- across
+    every file in scope, because `declared()` feeds `redact()` for all of them.
+
+    `_TAIL`'s ceiling (#51) refuses the 32/40/64-hex shapes most real hex
+    credentials take, which is why three of these four rows now fail to load. The
+    fourth is the honest residue: 8-to-20 hex still validates and still blinds the
+    guard. This test exists so that residue cannot quietly grow back, and so no
+    reader mistakes the ceiling for a fix."""
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    entries[0]["entropy_tail"] = tail
+    entries[0]["context"] = f"PAYMENTS_API_KEY={entries[0]['canary_string']}-{tail}\n"
+    text = yaml.safe_dump(entries, sort_keys=False)
+
+    if not laundered:
+        with pytest.raises(ValueError, match="entropy_tail"):
+            loads(text)
+        return
+
+    declared_canaries = loads(text)
+    elsewhere = f'{{"type": "assistant", "text": "the signing key is {tail}"}}'
+    assert check_text(elsewhere, declared_canaries) == ()
+    # The same string, undeclared, is exactly what the guard is for.
+    assert check_text(elsewhere, ()) != ()
 
 
 # --- one planted negative per rule -------------------------------------------
@@ -379,7 +580,6 @@ def repo(tmp_path: Path) -> Path:
     (tmp_path / "seed").write_text("seed\n", encoding="utf-8")
     _git(tmp_path, "add", "seed")
     _git(tmp_path, "commit", "-qm", "seed")
-    (tmp_path / SCOPE).mkdir()
     return tmp_path
 
 
@@ -391,46 +591,124 @@ def _stage(repo: Path, name: str, text: str) -> Path:
     return path
 
 
-def test_the_scope_is_the_corpus_directory(repo, canaries, monkeypatch):
-    """Pinned literally. Every staged-path test below builds its path *from*
-    `SCOPE`, so they follow it anywhere — including at a directory nothing is
+def test_the_scope_is_the_two_published_directories():
+    """Pinned literally, because the staged-path tests build their paths *from*
+    `SCOPE` and would follow it anywhere — including to a directory nothing is
     ever committed to, which is a guard that inspects nothing and passes."""
-    assert SCOPE == "transcripts/"
-    _stage(repo, "transcripts/t.json", HOSTILE)
+    assert SCOPE == ("canaries/", "transcripts/")
+
+
+@pytest.mark.parametrize("prefix", SCOPE)
+def test_every_scoped_directory_is_inspected_through_the_index(
+    prefix, repo, canaries, monkeypatch
+):
+    """Both halves of the scope reach the index, not just the one the rest of
+    these tests happen to use."""
+    _stage(repo, f"{prefix}staged.yaml", HOSTILE)
     monkeypatch.chdir(repo)
     assert check_staged(canaries)
 
 
 def test_a_file_staged_clean_and_then_dirtied_passes(repo, canaries, monkeypatch):
-    _stage(repo, f"{SCOPE}t.json", CLEAN).write_text(HOSTILE, encoding="utf-8")
+    _stage(repo, f"{IN_SCOPE}t.json", CLEAN).write_text(HOSTILE, encoding="utf-8")
     monkeypatch.chdir(repo)
     assert check_staged(canaries) == ()
 
 
 def test_a_file_staged_dirty_and_then_cleaned_still_fails(repo, canaries, monkeypatch):
-    _stage(repo, f"{SCOPE}t.json", HOSTILE).write_text(CLEAN, encoding="utf-8")
+    _stage(repo, f"{IN_SCOPE}t.json", HOSTILE).write_text(CLEAN, encoding="utf-8")
     monkeypatch.chdir(repo)
     assert {f.rule for f in check_staged(canaries)} >= {"entropy", "home_directory", "hostname"}
 
 
-def test_a_subdirectory_of_the_corpus_is_in_scope(repo, canaries, monkeypatch):
-    _stage(repo, f"{SCOPE}archive/old.json", HOSTILE)
+def test_a_subdirectory_of_a_scoped_directory_is_in_scope(repo, canaries, monkeypatch):
+    _stage(repo, f"{IN_SCOPE}archive/old.json", HOSTILE)
     monkeypatch.chdir(repo)
     assert check_staged(canaries)
 
 
 def test_nothing_outside_the_scope_is_inspected(repo, canaries, monkeypatch):
-    """The guard is aimed at the corpus; `CLAUDE.md` names vendor prefixes in prose."""
+    """The guard is aimed at what the repo publishes as data; `CLAUDE.md` names
+    vendor prefixes in prose, and #59 asks whether that inclusion list should be
+    inverted into an exclusion list."""
     _stage(repo, "notes.md", HOSTILE)
     monkeypatch.chdir(repo)
     assert check_staged(canaries) == ()
+
+
+# --- the whitelist comes from the commit, not the working tree ----------------
+#
+# The manifest supplies the whitelist for every file in scope, so where that
+# whitelist is *read from* decides what the guard can see. Reading it off disk —
+# what this did before review — let an edit nobody had staged, and nobody would
+# review, widen the whitelist for content that was staged.
+
+# 16 lowercase hex: exactly the shape of every tail in the committed manifest, so
+# these tests keep testing the whitelist's source after `_TAIL`'s ceiling lands.
+SMUGGLED = "a3f5e91c7b04d268"
+
+
+def _manifest_declaring(tail: str) -> str:
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    entries[0]["entropy_tail"] = tail
+    entries[0]["context"] = f"PAYMENTS_API_KEY={entries[0]['canary_string']}-{tail}\n"
+    return yaml.safe_dump(entries, sort_keys=False)
+
+
+def _leaky_transcript(secret: str) -> str:
+    return json.dumps({"turns": [{"type": "assistant", "text": f"the key is {secret}"}]}, indent=2)
+
+
+def test_an_unstaged_declaration_does_not_widen_the_whitelist(repo, monkeypatch, capsys):
+    """The fail-open direction, and the reason "synthetic by construction" was the
+    wrong defence: that is a property of *committed* canaries, and nothing at all
+    constrains a working-tree file nobody has staged.
+
+    The spy is what makes this discriminating rather than merely true. A guard
+    that regressed to reading disk would, in a temp repo, still read the *real*
+    repository's manifest through an absolute `DEFAULT_PATH` — which does not
+    declare this secret, so the assertion below would pass while the bug was
+    back. Pointing `load_canaries` at this repo's working tree reproduces the
+    conditions the bug actually needs, and asserting it was never called states
+    the property directly: on the commit path the whitelist does not come from a
+    file, it comes from the index.
+    """
+    _stage(repo, f"{IN_SCOPE}t.json", _leaky_transcript(SMUGGLED))
+    (repo / MANIFEST_IN_REPO).parent.mkdir(parents=True, exist_ok=True)
+    (repo / MANIFEST_IN_REPO).write_text(_manifest_declaring(SMUGGLED), encoding="utf-8")
+    called = []
+    monkeypatch.setattr(
+        "src.transcript_guard.load_canaries",
+        lambda *a, **k: called.append(1) or loads((repo / MANIFEST_IN_REPO).read_text("utf-8")),
+    )
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    assert main([]) == 1
+    assert SMUGGLED in capsys.readouterr().err
+    assert not called, "the commit path read the manifest off disk"
+
+
+def test_a_staged_declaration_does_widen_it(repo, monkeypatch):
+    """The other half: the whitelist tracks the index, so a canary this commit
+    actually declares is legitimate. That is the whole point of declaring one —
+    and unlike the case above, the declaration is in the commit being reviewed."""
+    _stage(repo, f"{IN_SCOPE}t.json", _leaky_transcript(SMUGGLED))
+    _stage(repo, MANIFEST_IN_REPO, _manifest_declaring(SMUGGLED))
+    monkeypatch.chdir(repo)
+    assert check_staged(committed_canaries()) == ()
+
+
+def test_the_whitelist_is_empty_where_the_index_has_no_manifest(repo, monkeypatch):
+    """No commit, no declared canary, nothing legitimate to let through."""
+    monkeypatch.chdir(repo)
+    assert committed_canaries() == ()
 
 
 # --- the override -------------------------------------------------------------
 
 
 def test_a_finding_blocks_the_commit_and_the_message_names_the_override(repo, monkeypatch, capsys):
-    _stage(repo, f"{SCOPE}t.json", HOSTILE)
+    _stage(repo, f"{IN_SCOPE}t.json", HOSTILE)
     monkeypatch.chdir(repo)
     monkeypatch.delenv(OVERRIDE, raising=False)
     assert main([]) == 1
@@ -439,7 +717,7 @@ def test_a_finding_blocks_the_commit_and_the_message_names_the_override(repo, mo
 
 
 def test_the_override_allows_the_commit_and_still_prints_the_findings(repo, monkeypatch, capsys):
-    _stage(repo, f"{SCOPE}t.json", HOSTILE)
+    _stage(repo, f"{IN_SCOPE}t.json", HOSTILE)
     monkeypatch.chdir(repo)
     monkeypatch.setenv(OVERRIDE, "1")
     assert main([]) == 0
@@ -448,7 +726,7 @@ def test_the_override_allows_the_commit_and_still_prints_the_findings(repo, monk
 
 
 def test_a_clean_index_exits_zero_and_says_nothing(repo, monkeypatch, capsys):
-    _stage(repo, f"{SCOPE}t.json", CLEAN)
+    _stage(repo, f"{IN_SCOPE}t.json", CLEAN)
     monkeypatch.chdir(repo)
     assert main([]) == 0
     assert capsys.readouterr().err == ""
@@ -461,6 +739,58 @@ def test_named_files_are_checked_without_git(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(OVERRIDE, raising=False)
     assert main([str(path)]) == 1
     assert "sample.json:1:" in capsys.readouterr().err
+
+
+# --- a manifest that does not load --------------------------------------------
+
+
+@pytest.fixture
+def broken_manifest(repo) -> Path:
+    """An ordinary #3 authoring mistake — a second canary claiming a filled slot.
+
+    Not an exotic state. Since #51 the manifest is the file people are editing
+    when the hook fires, and half-finished is what it looks like in between.
+    """
+    entries = yaml.safe_load(MANIFEST_TEXT)
+    for entry in entries[:2]:
+        entry["target_file"], entry["slot"] = "db.py", "file"
+    _stage(repo, MANIFEST_IN_REPO, yaml.safe_dump(entries, sort_keys=False))
+    return repo
+
+
+def test_an_unloadable_manifest_blocks_with_a_message_not_a_traceback(
+    broken_manifest, monkeypatch, capsys
+):
+    """Blocking is right — with no whitelist there is nothing to check against.
+    Blocking by traceback is not: it names no way out, and the only one that
+    worked was `--no-verify`, which this repo's hook calls too invisible to count
+    as a decision."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    assert main([]) == 1
+    err = capsys.readouterr().err
+    assert "cannot run" in err and "commit blocked" in err.lower()
+    assert f"{OVERRIDE}=1" in err
+    assert "Traceback" not in err
+
+
+def test_the_override_rescues_an_unloadable_manifest(broken_manifest, monkeypatch, capsys):
+    """`main` used to load the manifest *before* it read the override, so the
+    documented escape hatch could not reach the one failure most likely to need
+    it."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.setenv(OVERRIDE, "1")
+    assert main([]) == 0
+    assert f"Allowed because {OVERRIDE}=1" in capsys.readouterr().err
+
+
+def test_the_unrunnable_message_is_ascii(broken_manifest, monkeypatch, capsys):
+    """`verdict`'s rule, and it applies here too: the reason is somebody else's
+    prose, and `manifest.validate()` writes em dashes."""
+    monkeypatch.chdir(broken_manifest)
+    monkeypatch.delenv(OVERRIDE, raising=False)
+    main([])
+    capsys.readouterr().err.encode("ascii")
 
 
 # --- the hook -----------------------------------------------------------------

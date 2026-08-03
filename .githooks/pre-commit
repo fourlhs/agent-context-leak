@@ -1,5 +1,6 @@
 #!/bin/sh
-# Refuse a commit that stages an unscrubbed transcript (#22).
+# Refuse a commit that stages an unscrubbed transcript (#22) or a real value in
+# the canary manifest (#51).
 #
 # Enable once per clone -- .git/hooks is not versioned, this directory is:
 #
