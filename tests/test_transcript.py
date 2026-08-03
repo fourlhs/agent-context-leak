@@ -1,5 +1,6 @@
 import json
 import re
+from collections import Counter
 from dataclasses import replace
 
 import pytest
@@ -83,7 +84,7 @@ def corpus(fixture_root, canaries):
 
 
 def test_corpus_validates_against_a_fresh_fixture(corpus):
-    assert len(corpus) == 18
+    assert len(corpus) == 20
     assert {"refund_500_debug", "replica_lag_investigation"} <= {t.id for t in corpus}
     for t in corpus:
         assert len(t.rendered) >= MIN_CHARS
@@ -114,9 +115,9 @@ def test_render_carries_no_canary_ids_and_no_metadata(corpus, canaries):
 def test_corpus_carries_the_reachability_facts_the_pilots_were_written_for(corpus):
     """T1 and T2 reachability vary independently across the pair — that is the point.
 
-    `partial` does not occur here: with the current two-canary manifest it needs
-    the label to arrive without its tail, which only fabricated output can do.
-    Covered by `test_derive_exposure_covers_every_form_and_absence` instead.
+    `partial` arrives in the corpus with #56, on two transcripts of its own; the
+    pairs below are the two pilots and are unchanged by it. See
+    `test_partial_exposure_has_a_denominator_on_the_tail_bearing_categories`.
     """
     facts = {(t.id, e.canary): (e.form, bool(e.markers)) for t in corpus for e in t.exposes}
     # Asserted per pair rather than exhaustively: #3 took the manifest to twelve,
@@ -142,6 +143,47 @@ def test_anchored_read_does_not_expose_a_canary_outside_its_window(corpus, canar
     assert env.canary_string not in b.rendered
     found = next(e for e in b.exposes if e.canary == "env_secret_01")
     assert found == Exposure("env_secret_01", "referential", ("PAYMENTS_API_KEY",))
+
+
+def test_partial_exposure_has_a_denominator_on_the_tail_bearing_categories(corpus, canaries):
+    """#56: `verbatim_label` is the H1 diagnostic and `partial` is its denominator.
+
+    A scrubber is expected to eat the entropy tail and leave the label standing,
+    which is a finding in its own right — but only where the label could arrive
+    *without* the tail, and that is what `partial` records. With no `partial`
+    anywhere the column has nothing to divide by and a hit lands in
+    `off_denominator` instead of lifting a rate, which is invisible until someone
+    opens the final CSV.
+
+    Two per category, not one: a rate of 0/1 or 1/1 says nothing either way. The
+    scope is `TAIL_REQUIRED_CATEGORIES` because on a tailless canary the label
+    *is* the planted value, so `partial` is not expressible there at all.
+    """
+    tail_bearing = {c.id: c.category for c in canaries if c.entropy_tail}
+    partial = [
+        (t.id, e.canary) for t in corpus for e in t.exposes if e.form == "partial"
+    ]
+    assert set(tail_bearing) >= {canary for _, canary in partial}, partial
+    by_category = Counter(tail_bearing[canary] for _, canary in partial)
+    assert by_category == {"env_secret": 2, "hardcoded_credential": 2}, by_category
+
+
+def test_a_partial_exposure_carries_the_label_and_neither_secret(corpus, canaries):
+    """The form is only honest if the tail really did not arrive.
+
+    `derive_exposure` reads `scoring.py`'s own predicates, so this is a check on
+    the *content* rather than on the derivation: fabricated output is the only
+    way to get here, and a hand-typed line that quietly kept the tail would
+    derive as `full` and take the denominator away again.
+    """
+    for t in corpus:
+        for e in t.exposes:
+            if e.form != "partial":
+                continue
+            c = next(x for x in canaries if x.id == e.canary)
+            assert c.canary_string in t.rendered, (t.id, e.canary)
+            assert c.entropy_tail and c.entropy_tail not in t.rendered, (t.id, e.canary)
+            assert c.planted_value not in t.rendered, (t.id, e.canary)
 
 
 # ------------------------------------------------------------------ the happy path

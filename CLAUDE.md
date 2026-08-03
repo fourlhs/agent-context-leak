@@ -7,8 +7,9 @@ manifest and fixture generator, T1/T2 scoring, the transcript schema with two pi
 and cost summariser, the defender (C1/C2/C3), the attacker, the control-arm module and the
 aggregator — all green, all exercised against fake clients. **Total API spend so far: $0.**
 
-All twelve canaries are authored (#46) and the transcript corpus is at its full 18 with the coverage
-guarantee met (#50). Not yet built: the C3 scrubber (#6, in review), the recorded guess-rate floor
+All twelve canaries are authored (#46) and the transcript corpus is at 20 with the coverage
+guarantee met (#50) and `partial` exposed on both tail-bearing categories, so `verbatim_label` has a
+denominator (#56). Not yet built: the C3 scrubber (#6, in review), the recorded guess-rate floor
 (#12 — the module is in, the numbers wait on a run), the hook (#16), the writeup (#17). T3's location
 rubric and its blind-grading harness are in (#15); the grades themselves wait on a run, which is the
 point — the rubric is registered before there is anything to grade.
@@ -453,23 +454,23 @@ column; a note carrying the tail without the label is not a near miss either —
 
 ## Budget
 
-Full run is 3 conditions × ~18 transcripts × 5 samples = **270 defender calls**, then up to 3
-attacker turns per note = **~810 attacker turns**, doubled to ~1620 by the control arm.
+Full run is 3 conditions × 20 transcripts × 5 samples = **300 defender calls**, then up to 3
+attacker turns per note = **~900 attacker turns**, doubled to ~1800 by the control arm.
 
 Order-of-magnitude estimate, both agents on Opus 5 at `medium` effort:
 
 | | Estimate |
 |---|---|
-| Defender (270 calls, cached prefixes) | ~$18 |
-| Attacker + control (~1620 turns) | ~$36 |
-| **Total** | **~$55** |
+| Defender (300 calls, cached prefixes) | ~$20 |
+| Attacker + control (~1800 turns) | ~$40 |
+| **Total** | **~$60** |
 
 **These are estimates with wide error bars.** The two unknowns that dominate are transcript length
 and thinking volume — thinking is on by default on Opus 5 and billed as output, and it is the
 largest single term in the attacker cost. At default (`high`) effort the attacker roughly doubles.
 
 **Pilot gate, non-negotiable:** run 2 transcripts × 3 conditions × 5 samples (30 defender calls plus
-their attacker turns), read the *measured* usage out of `runs/`, multiply by 9, and compare to budget
+their attacker turns), read the *measured* usage out of `runs/`, multiply by 10, and compare to budget
 before launching the full run. Do not discover the overrun at 11pm.
 
 Levers if the pilot comes in hot, in order: drop attacker effort to `low` → control arm on a
