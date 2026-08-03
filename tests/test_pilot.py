@@ -833,6 +833,38 @@ def test_the_elasticity_is_clamped_to_a_plausible_range():
     assert "-2.00" in factors[THINKING].derivation  # the raw fit is still reported
 
 
+def test_the_clamp_is_applied_after_the_shift_and_never_before():
+    """`_clamp(e + shift*se)`, not `_clamp(e) + shift*se`.
+
+    The two agree everywhere except where they matter: a fit already outside
+    [0, 1]. There the clamped-first form walks the shifted candidates back
+    *out* of the family the bound is taken over -- an `e = -0.06` projection
+    sitting in `candidates` with nothing in `BOUND_ELASTICITIES` covering it,
+    and F decreasing in e on a corpus like this one, so the excursion is
+    anti-conservative.
+
+    Here e fits at -2.00 +/- 0.06, so all three of the fitted candidates must
+    land on the same clamped e = 0 -- and the scatter is real, so they are not
+    equal merely because the standard error is zero.
+    """
+    outside = (
+        _defender("a", 0, 380, 50, write=300),
+        _defender("a", 1, 400, 50, read=300),
+        _defender("a", 2, 420, 50, read=300),
+        _defender("b", 0, 95, 100, write=500),
+        _defender("b", 1, 100, 100, read=500),
+        _defender("b", 2, 105, 100, read=500),
+    )
+    extrapolation = project(outside, SIZES)
+
+    assert "elasticity -2.00 +/- 0.06, used 0.00" in extrapolation.factors[THINKING].derivation
+    assert (
+        extrapolation.candidates["fit -1 SE"]
+        == extrapolation.candidates["fit"]
+        == extrapolation.candidates["fit +1 SE"]
+    )
+
+
 # --------------------------------------------------------- the fit's arithmetic
 #
 # The verdict rests on these four functions and, until #61's mutation battery,
@@ -1054,6 +1086,22 @@ def test_the_report_shows_every_multiplier_and_where_it_came_from(capsys):
     assert "elasticity +1.00" in out
     for term in TERMS:
         assert term in out
+
+
+def test_the_records_column_is_projected_and_not_the_pilot_count(capsys):
+    """Display-only, and wrong in the operator's headline table: dropping the
+    count factor prints the pilot's 30 records beside a 270-call cost, which
+    reads as a projection that forgot to project."""
+    report(PAIR, SIZES)
+
+    lines = capsys.readouterr().out.splitlines()
+    header = next(i for i, l in enumerate(lines) if l.startswith("stage") and "cache_write" in l)
+    # 4 defender records x the 2.00 count factor; 1 each for attacker and control.
+    assert [l.split()[:2] for l in lines[header + 1 : header + 4]] == [
+        [attacker.STAGE, "2"],
+        [control.STAGE, "2"],
+        [defender.STAGE, "8"],
+    ]
 
 
 def test_the_report_clears_a_run_that_fits_the_budget(capsys):
