@@ -788,6 +788,40 @@ def test_the_bound_is_evaluated_rather_than_assumed_to_sit_at_one_end():
         assert extrapolation.bound == max(extrapolation.candidates.values())
 
 
+# A corpus where `F` is *not* monotone in `e`: sixteen transcripts bunched in the
+# middle and a pilot pair at the extremes. F(0) = 9.000 and F(1) = 8.805, but F
+# peaks at 10.869 around e = 0.40 -- so the endpoints do not bound the family and
+# a band around the fit does not either.
+INTERIOR = {f"c{i}": 10000 for i in range(16)} | {"p": 500, "q": 20000}
+
+INTERIOR_PEAK = (
+    _defender("p", 0, 90, 50, write=300),
+    _defender("p", 1, 100, 50, read=300),
+    _defender("p", 2, 110, 50, read=300),
+    _defender("q", 0, 420, 100, write=500),
+    _defender("q", 1, 437, 100, read=500),
+    _defender("q", 2, 454, 100, read=500),
+)
+
+
+def test_the_bound_covers_a_point_estimate_that_beats_both_endpoints():
+    """`F` need not be monotone in `e`, and the bound must not assume it is.
+
+    On the real corpus `F` decreases in `e`, so `max(F(0), F(1))` happens to
+    cover everything and the point estimate never wins. That is a property of
+    this corpus, not of the arithmetic: bunch the corpus in the middle and put
+    the pilot at the extremes and `F` acquires an interior maximum, where both
+    endpoints *and* a band around the fit sit below the fit itself. The fit is
+    a candidate for exactly this reason and the assertion below is what says so.
+    """
+    extrapolation = project(INTERIOR_PEAK, INTERIOR)
+
+    assert "elasticity +0.40" in extrapolation.factors[THINKING].derivation
+    beaten = ("e = 0.00", "e = 1.00", "fit -1 SE", "fit +1 SE")
+    assert all(extrapolation.candidates[label] < extrapolation.cost for label in beaten)
+    assert extrapolation.bound == extrapolation.cost
+
+
 def test_a_noisy_fit_still_cannot_soften_the_bound():
     """The fitted band is one candidate among five, never the verdict on its own."""
     noisy = project(NOISY, SIZES)

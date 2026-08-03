@@ -685,6 +685,15 @@ def project(records: Sequence[RunRecord], sizes: Mapping[str, int]) -> Extrapola
         candidate = _factors(sizes, piloted, measured, **kwargs)
         return sum(p.cost for p in _stages(records, candidate).values())
 
+    # The point estimate is a candidate in its own right, and not because it is
+    # a convenient label for the central number. `F` need not be monotone in
+    # `e`: bunch the corpus in the middle and put the pilot at the extremes and
+    # it acquires an interior maximum -- 16 transcripts at 10,000 chars piloted
+    # at (500, 20,000) gives F(0) = 9.000 and F(1) = 8.805 with a peak of 10.869
+    # near e = 0.40, so neither the endpoints nor a band around the fit covers
+    # the fit. On *this* corpus `F` decreases in `e` and the endpoints do cover
+    # everything, but that is a property of the corpus rather than of the
+    # arithmetic, and the bound must not rest on it silently.
     candidates = {"fit": sum(p.cost for p in stages.values())}
     candidates["fit -1 SE"] = total(shift=-1.0)
     candidates["fit +1 SE"] = total(shift=1.0)
