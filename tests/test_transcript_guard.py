@@ -308,6 +308,11 @@ def test_a_real_value_pasted_into_the_manifest_is_caught(name, canaries):
     cannot stand in for five dead ones. Checking only that *something* fired was
     the earlier version of this test and it would have passed with four of the
     five rules deleted, which is the #22 defect one level up.
+
+    Membership rather than equality, since #62: an AWS-shaped key is now caught by
+    the entropy rule as well, `_wordy` having stopped reading an all-uppercase run
+    broken by a digit as words. Two rules on one real value is the guard working;
+    the property this test is for is that the *named* one fired.
     """
     anchor, replacement, secret, rule = PASTED[name]
     assert MANIFEST_TEXT.count(anchor) == 1, f"{name}: the anchor is no longer unique"
@@ -316,7 +321,7 @@ def test_a_real_value_pasted_into_the_manifest_is_caught(name, canaries):
     findings = check_text(text, canaries, path="manifest.yaml")
     on_the_line = [f for f in findings if f.line in lines]
     assert on_the_line, f"{name} passed clean"
-    assert {f.rule for f in on_the_line} == {rule}
+    assert rule in {f.rule for f in on_the_line}
 
 
 def test_a_manifest_comment_is_not_exempt(canaries):
@@ -430,6 +435,46 @@ def test_a_class_poor_blob_is_caught(canaries):
     assert "entropy" in {f.rule for f in findings}
 
 
+@pytest.mark.parametrize(
+    "blob",
+    [
+        "LEP5TWKLKAQKHB66BVKNFU4BZTVX5ATS",  # 32 chars, as a TOTP seed comes
+        "3PRMLBMAJPIGX47TMXKVJZYVZ6AXEGB5",
+        "hovvi2grqhzw7udze5qzypkkczv27wic",  # the same alphabet, lowercased
+        "BLTESPTCLTG7QZWTQK3Q7JV25BPXB2I3JZYVZ6AX",  # 40 chars, a recovery code
+    ],
+)
+def test_a_base32_blob_is_not_exempted_as_words(blob, canaries):
+    """`_wordy`'s cased branch used to read an entire encoding as words (#62), and
+    base32's `2-7` were the reason: a digit inside a run-together token split
+    `JBSWY3DPEHPK3PXP` into "JBSWY", "3", "DPEHPK" and so on, each of which the
+    camel pattern accepts. Measured on this checkout before the fix, 32.0% of
+    random 32-character base32 blobs and 25.7% of 40-character ones walked past the
+    entropy rule on that exemption alone; after it, 0.10% and 0.00%. 5000 samples
+    per length, alphabet `A-Z234567`, seed 62.
+
+    The cased branch now takes letters only, so a digit-free base32 run cannot
+    decompose at all — one unbroken case run is a single part — while the
+    separated branch is untouched and `manylinux2014_x86_64` keeps its exemption in
+    the negatives list below. What the fix does **not** reach is the entropy floor:
+    16-character base32 still passes 31.26% of the time, and the canonical
+    published demo seed measures 3.375 bits against a 3.5 floor and passes every
+    time. That residue is the module docstring's second blind spot, not this
+    exemption's.
+    """
+    assert "entropy" in {f.rule for f in check_text(f"seed {blob}", canaries)}
+
+
+def test_a_run_together_cased_name_carrying_a_digit_is_now_a_finding(canaries):
+    """The cost of the line above, pinned so it is a registered trade rather than a
+    surprise. `Sha256DigestHandler` has no separator to mark its word boundaries,
+    so once digits stop marking them it reads as random — the same shape as the
+    base32 blob, which is exactly why the exemption could not tell them apart. A
+    separator restores it: `sha256_digest_handler` is clean."""
+    assert "entropy" in {f.rule for f in check_text("class Sha256DigestHandler:", canaries)}
+    assert check_text("def sha256_digest_handler(row):", canaries) == ()
+
+
 def test_a_slash_joined_random_run_is_caught(canaries):
     """`/` is out of the token class so tracebacks stay quiet, which leaves a key
     shaped like this readable only when the run is read whole.
@@ -466,6 +511,36 @@ def test_a_bare_vendor_word_is_not_a_prefix(canaries):
 
 
 @pytest.mark.parametrize(
+    "header",
+    [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN DSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+    ],
+)
+def test_a_pem_private_key_header_is_caught(header, canaries):
+    """The most recognisable real-secret marker there is, and until #62 the guard
+    had nothing for it: a key file pasted into a transcript passed clean, because
+    the base64 body wraps at 64 columns and the entropy rule reaches those lines or
+    not depending on where the breaks fall. The header does not depend on anything,
+    so it is matched with no length or entropy gate — no canary can produce one.
+    The family is one rule, not seven."""
+    assert "private_key" in {f.rule for f in check_text(f"pasted: {header}", canaries)}
+
+
+def test_a_pem_header_inside_json_is_caught(canaries):
+    """The corpus's only format: a key file arrives as one escaped string, so the
+    header shares its line with whatever follows the armour rather than owning a
+    line of its own."""
+    line = json.dumps({"result": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk"})
+    assert "private_key" in {f.rule for f in check_text(line, canaries)}
+
+
+@pytest.mark.parametrize(
     "text",
     [
         'db_password: "Tr0ub4dor"',
@@ -483,6 +558,23 @@ def test_a_credential_shape_is_caught(text, canaries):
     and a rule that needs a bare `=` never fires on it. Short and word-shaped
     values are here too — they sit under every entropy floor, so the key's name
     is their only defence."""
+    assert "credential_shape" in {f.rule for f in check_text(text, canaries)}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SESSION_KEY = 0f9a3c7e1b5d",
+        '"session": "8f14e45fceea167a"',
+        '\\"cookie\\": \\"s%3AabcdefghijkLMNOP\\"',
+    ],
+)
+def test_a_session_or_cookie_key_is_caught(text, canaries):
+    """`_SECRET_NAME` knew `session_token` only through `token`, so a bare
+    `session` key — or a `cookie` — carried its value past every rule unless the
+    value happened to clear an entropy floor on its own (#62). Both name bearer
+    material as squarely as `token` does, and the key's name is the only defence a
+    short value has."""
     assert "credential_shape" in {f.rule for f in check_text(text, canaries)}
 
 

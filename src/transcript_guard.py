@@ -29,8 +29,9 @@ The two were written independently and land on some of the same shapes, because
 there are only so many shapes a secret takes. Where they differ, **this one is
 deliberately the stricter**: a safety net that lets through what the mechanism
 under test would catch has it backwards. Hence a vendor prefix with no length
-gate, a blob rule tighter than the scrubber's, and a second pass over `/`-joined
-runs.
+gate, a PEM header with no gate at all, a blob rule tighter than the scrubber's,
+a `_wordy` exemption that spares no encoding the scrubber would catch (#62), and
+a second pass over `/`-joined runs.
 
 **Where the line is on the manifest (#51). This paragraph is the authoritative
 statement of it; `README.md` and `CLAUDE.md` summarise and point here.**
@@ -83,10 +84,19 @@ GitHub or quoting a real documentation link fires the hostname rule.
 Deliberately noisy rather than clever. A false positive costs one
 `CANARY_GUARD_OVERRIDE=1`; a false negative is permanent and public.
 
-One blind spot, stated rather than papered over: a **passphrase** —
+Two blind spots, stated rather than papered over. A **passphrase** —
 `correct-horse-battery-staple` — is word-shaped by construction, so no entropy
-rule separates it from an identifier. Its only defence here is the key it sits
-behind, which is why `_SECRET_NAME` is generous.
+rule separates it from an identifier; its only defence here is the key it sits
+behind, which is why `_SECRET_NAME` is generous. And a **short blob** is bounded
+by the entropy floor rather than by any exemption. Now that `_wordy` spares no
+encoding (#62), a random 32-character base32 run is missed 0.10% of the time and
+a 40-character one 0.00%, but a 16-character one — the length a TOTP seed comes
+in — still passes 31.26%, because 16 characters drawn from 32 symbols often do
+not reach `_MIXED_BITS`; the canonical published demo seed measures 3.375 bits
+and passes every time. Before #62 the same three lengths read 65.60%, 32.10% and
+25.70%, the exemption being the whole of the miss at the two longer ones. 5000
+samples per length, alphabet `A-Z234567` and its lowercase twin (which score
+identically, the two case branches being symmetric), seed 62.
 """
 
 import math
@@ -130,6 +140,15 @@ _VENDOR = re.compile(
     r"|xox[baprs]-|AIza|ya29\.|glpat-|npm_|dop_v1_)[A-Za-z0-9_\-]*"
 )
 
+# --- private keys ------------------------------------------------------------
+# A PEM header, which is the most recognisable real-secret marker there is and
+# one no canary can produce, so like a vendor prefix it gets no length or entropy
+# gate. The body is base64 wrapped at 64 columns and the entropy rule reaches it
+# or not depending on where the line breaks fall; the header does not depend on
+# anything. `[A-Z0-9 ]*` covers the family — RSA, DSA, EC, OPENSSH, ENCRYPTED,
+# PGP's ` BLOCK` suffix, and the bare `PRIVATE KEY` of a PKCS#8 file.
+_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+
 # --- credential shapes -------------------------------------------------------
 # `(?:\\?")?` after the key is what makes this work on JSON: the closing quote of
 # `"api_key"` sits between the name and the colon, and inside an embedded dump it
@@ -151,7 +170,7 @@ _URL_CREDENTIAL = re.compile(r"://[^\s/:@]+:(?P<password>[^\s/@]+)@")
 _SECRET_NAME = re.compile(
     r"secret|token|password|passwd|pwd|api[_-]?key|apikey|access[_-]?key"
     r"|private[_-]?key|signing[_-]?key|master[_-]?key|encryption[_-]?key"
-    r"|credential|passphrase|auth|dsn|bearer|jwt|hmac|salt",
+    r"|credential|passphrase|auth|dsn|bearer|jwt|hmac|salt|session|cookie",
     re.IGNORECASE,
 )
 # `api_key = os.environ["PAYMENTS_API_KEY"]` names where a secret is *read from*.
@@ -274,6 +293,10 @@ def _vendor_prefix(line: str):
     return (m.group() for m in _VENDOR.finditer(line))
 
 
+def _private_key(line: str):
+    return (m.group() for m in _PEM.finditer(line))
+
+
 def _credential_shape(line: str):
     """A credential behind a secret-*named* key, assigned or inside a URL.
 
@@ -332,6 +355,7 @@ def _allowed_host(host: str) -> bool:
 
 RULES = (
     ("vendor_prefix", _vendor_prefix),
+    ("private_key", _private_key),
     ("credential_shape", _credential_shape),
     ("entropy", _entropy),
     ("home_directory", _home_directory),
@@ -356,12 +380,22 @@ def _wordy(token: str) -> bool:
     (`SomeVeryLongDescriptiveHandlerName`). Both are long and varied enough to
     clear an entropy floor and neither is a secret. A passphrase is wordy too —
     see the module docstring; that one is `_SECRET_NAME`'s job.
+
+    **The cased branch takes letters only (#62), and the digit is the whole
+    point.** A separator is a word boundary somebody typed, so digits are fine
+    beside one — `manylinux2014_x86_64` keeps its exemption. Inside a
+    run-together token nothing marks a boundary but case, and a digit there is
+    not a word break, it is an encoding: base32's `2-7` are exactly what split
+    `JBSWY3DPEHPK3PXP` into "words", and a digit-free base32 run cannot decompose
+    at all, because one unbroken case run is a single part. The cost is that a
+    run-together *cased* name carrying a digit — `Sha256DigestHandler` — is now a
+    finding, which is the trade this guard takes by design.
     """
     parts = re.split(r"[_\-]", token)
     if len(parts) > 1 and all(_WORD_PART.fullmatch(p) for p in parts):
         return True
     cased = _CAMEL_PART.findall(token)
-    return len(cased) > 1 and "".join(cased) == token
+    return token.isalpha() and len(cased) > 1 and "".join(cased) == token
 
 
 def _random_looking(token: str) -> bool:
