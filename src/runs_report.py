@@ -45,14 +45,21 @@ CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
 # Fields that must not vary within a stage — see the module docstring.
-PROVENANCE = ("model", "effort")
+PROVENANCE = ("model", "effort", "prompt_hash")
 
-# `prompt_hash` is checked within (stage, condition) rather than within a stage,
-# because it is *supposed* to vary by condition: C2 appends its instruction, and
-# C1 and C3 share a hash by construction. Checked per stage it fires on every
-# real defender run, and a warning that is always on is a warning nobody reads —
-# which matters more since #14 folds these into the gate's own exit code.
-CONDITIONAL_PROVENANCE = ("prompt_hash",)
+# The one exception, and it is stage-specific. The **defender's** `prompt_hash` is
+# supposed to vary by condition — C2 appends its instruction, C1 and C3 share a
+# hash by construction — so checking it per stage fires on every real defender run,
+# and a warning that is always on is a warning nobody reads. It is checked within
+# (stage, condition) there instead.
+#
+# It must stay per-stage everywhere else. `attacker.prompt_hash()` takes no
+# condition at all, so there is nothing legitimate for it to vary with, and
+# `pilot.run` iterates condition-major within each transcript — an edit to
+# `prompts/attack.md` mid-run therefore lands cleanly on a condition boundary and
+# would be **invisible** to a per-condition check. Narrowing it for every stage
+# was a real hole, opened while fixing the defender's false positive.
+BY_CONDITION = {"defender": ("prompt_hash",)}
 
 
 @dataclass(frozen=True)
@@ -137,18 +144,20 @@ def provenance_warnings(records: tuple[RunRecord, ...]) -> list[str]:
     `low`. Nothing errors, `runs/` quietly holds both, #13 aggregates across
     them, and the re-measured cost lands low — the reassuring direction.
 
-    Model and effort are checked across a whole stage, because neither may vary at
-    all. `prompt_hash` is checked within a condition, because it varies *by*
-    condition on purpose — see `CONDITIONAL_PROVENANCE`.
+    Everything is checked across a whole stage except where `BY_CONDITION` says
+    otherwise, which today is the defender's `prompt_hash` and nothing else.
     """
     warnings = []
-    by_condition: dict[tuple[str, str], list[RunRecord]] = {}
     for stage, rs in _by_stage(records).items():
-        warnings += _mixed(stage, rs, PROVENANCE)
+        conditional = BY_CONDITION.get(stage, ())
+        warnings += _mixed(stage, rs, tuple(f for f in PROVENANCE if f not in conditional))
+        if not conditional:
+            continue
+        by_condition: dict[str, list[RunRecord]] = {}
         for r in rs:
-            by_condition.setdefault((r.stage, r.condition), []).append(r)
-    for (stage, condition), rs in sorted(by_condition.items()):
-        warnings += _mixed(f"{stage}/{condition or '-'}", tuple(rs), CONDITIONAL_PROVENANCE)
+            by_condition.setdefault(r.condition, []).append(r)
+        for condition, group in sorted(by_condition.items()):
+            warnings += _mixed(f"{stage}/{condition or '-'}", tuple(group), conditional)
     return warnings
 
 

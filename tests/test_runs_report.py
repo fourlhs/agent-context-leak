@@ -195,6 +195,35 @@ def test_c2_having_its_own_prompt_hash_is_not_a_warning():
     assert provenance_warnings(by_condition) == []
 
 
+def test_the_attackers_prompt_hash_is_still_checked_across_the_whole_stage():
+    """`attacker.prompt_hash()` takes no condition, so it has nothing legitimate
+    to vary with. And `pilot.run` iterates condition-major inside each transcript,
+    so an edit to `prompts/attack.md` mid-run lands cleanly on a condition
+    boundary — a per-condition check would not see it at all."""
+    mid_run_edit = (
+        replace(DEFENDER, stage="attacker", condition="C1"),
+        replace(DEFENDER, stage="attacker", condition="C2", prompt_hash="deadbeef"),
+        replace(DEFENDER, stage="attacker", condition="C3", prompt_hash="deadbeef"),
+    )
+
+    assert provenance_warnings(mid_run_edit) == [
+        "attacker mixes prompt_hash: a1b2c3d4, deadbeef"
+    ]
+
+
+def test_the_control_arm_is_checked_the_same_way_as_the_attacker():
+    """It runs the attacker's own prompt through `attacker.run`, so it inherits
+    the same invariant and must not inherit the defender's exception."""
+    mid_run_edit = (
+        replace(DEFENDER, stage="control", condition="C1"),
+        replace(DEFENDER, stage="control", condition="C2", prompt_hash="deadbeef"),
+    )
+
+    assert provenance_warnings(mid_run_edit) == [
+        "control mixes prompt_hash: a1b2c3d4, deadbeef"
+    ]
+
+
 def test_one_setting_per_stage_warns_about_nothing(store):
     assert provenance_warnings(store.read_all()) == []
 
