@@ -7,7 +7,7 @@ by inspecting the request rather than by watching a bill.
 
 import ast
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -209,6 +209,114 @@ def test_a_truncated_note_never_reaches_the_store(store):
     with pytest.raises(RuntimeError, match="truncated"):
         run(TRANSCRIPT, "t1", client, store, samples=1, **PROVENANCE)
     assert store.read_all() == ()
+
+
+# ------------------------------------------------------------- refusal vs truncation
+
+
+def refusing(client):
+    """A reply in Opus 5's documented refusal shape: HTTP 200, empty content."""
+    client._reply.content = [SimpleNamespace(type="thinking", thinking="")]
+    client._reply.stop_reason = "refusal"
+    return client
+
+
+def test_a_refusal_and_a_truncation_are_different_exceptions():
+    """They arrive from the same function and used to be the same class, so a
+    caller could not survive one and stop on the other. #14 must do exactly that:
+    a refusal costs one sample, a truncation says `MAX_TOKENS` is wrong for the
+    corpus and every further call is spend against a broken ceiling.
+    """
+    truncating = FakeClient()
+    truncating._reply.stop_reason = "max_tokens"
+
+    with pytest.raises(defender.Refused):
+        distill(TRANSCRIPT, "C1", refusing(FakeClient()))
+    with pytest.raises(defender.Truncated):
+        distill(TRANSCRIPT, "C1", truncating)
+    # Both still `RuntimeError`, so an existing caller catching that is unaffected.
+    assert issubclass(defender.Refused, RuntimeError)
+    assert issubclass(defender.Truncated, RuntimeError)
+    assert not issubclass(defender.Refused, defender.Truncated)
+
+
+def test_a_refusal_carries_what_the_call_billed():
+    """The call happened either way, and #14 multiplies measured spend. A refusal
+    that drops its tokens is spend the budget check cannot see."""
+    with pytest.raises(defender.Refused) as raised:
+        distill(TRANSCRIPT, "C1", refusing(FakeClient()))
+
+    assert raised.value.usage == Usage(1200, 340, 8000, 0)
+    assert raised.value.stop_reason == "refusal"
+
+
+def test_a_refusal_is_logged_and_re_raised_by_default(store):
+    """Log first, then raise. The default stays loud — only #14 opts out."""
+    with pytest.raises(defender.Refused):
+        run(TRANSCRIPT, "t1", refusing(FakeClient()), store, samples=1, **PROVENANCE)
+
+    record = store.read(defender.STAGE, "C1", "t1", 0)
+    assert defender.failed(record)
+    assert record.usage == Usage(1200, 340, 8000, 0)
+    assert record.stop_reason == "refusal"
+
+
+def test_a_failure_record_cannot_be_read_as_an_empty_note(store):
+    """No note in it at all. Scored as one it would find no canary, read clean,
+    and sit in every exposure-conditioned denominator anyway."""
+    with pytest.raises(defender.Refused):
+        run(TRANSCRIPT, "t1", refusing(FakeClient()), store, samples=1, **PROVENANCE)
+
+    record = store.read(defender.STAGE, "C1", "t1", 0)
+    assert json.loads(record.output)["failed"]
+    assert record.raw_output == ""
+    # And the predicate is not vacuous: a real note is not a failure.
+    assert not defender.failed(replace(record, output=NOTE))
+
+
+def test_a_collector_lets_one_caller_survive_a_refusal(store):
+    """`on_refusal` is a parameter for exactly one caller, on the precedent
+    `attacker.run`'s `stage` sets. #14 must not abort on a refused note — it has
+    already spent the money and would report nothing."""
+    collected = []
+    run(
+        TRANSCRIPT,
+        "t1",
+        refusing(FakeClient()),
+        store,
+        samples=2,
+        on_refusal=lambda c, s, exc: collected.append((c, s, str(exc))),
+        **PROVENANCE,
+    )
+
+    assert len(collected) == len(CONDITIONS) * 2  # the loop carried on to the end
+    assert len(store.read_all()) == len(CONDITIONS) * 2
+    assert all(defender.failed(r) for r in store.read_all())
+
+
+def test_a_truncation_propagates_even_with_a_collector(store):
+    """The carve-out is refusals only. A truncated note biases every tier
+    downward while looking complete, and the ceiling is wrong for the whole run."""
+    client = FakeClient()
+    client._reply.stop_reason = "max_tokens"
+
+    with pytest.raises(defender.Truncated):
+        run(
+            TRANSCRIPT,
+            "t1",
+            client,
+            store,
+            samples=1,
+            on_refusal=lambda *a: pytest.fail("a truncation must not be collected"),
+            **PROVENANCE,
+        )
+
+
+def test_a_good_record_carries_its_stop_reason(store):
+    """Computed in `Distillation` and, before #14, thrown away."""
+    run(TRANSCRIPT, "t1", FakeClient(), store, conditions=("C1",), samples=1, **PROVENANCE)
+
+    assert store.read(defender.STAGE, "C1", "t1", 0).stop_reason == "end_turn"
 
 
 def test_stop_reason_leaves_distill_so_it_can_be_acted_on():

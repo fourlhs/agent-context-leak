@@ -45,12 +45,13 @@ Determinism lives in the scorer; we report rates over repeated samples.
 """
 
 import hashlib
+import json
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from src.runs import RunRecord, RunStore, Usage
+from src.runs import RunRecord, RunStore, Usage, failed
 
 PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -88,6 +89,40 @@ class Distillation:
     redactions: int
     stop_reason: str
     raw: str = ""
+
+
+class Truncated(RuntimeError):
+    """The note hit `MAX_TOKENS`. **Never recoverable** — see the module docstring.
+
+    A truncated note holds fewer canaries and scores low on every tier while
+    #13's denominator counts it anyway, so it biases the headline downward with
+    nothing in `runs/` to show it. It also says `MAX_TOKENS` is wrong for this
+    corpus, and continuing to spend under a known-broken ceiling is not a
+    measurement. Distinct from `Refused` because the two are the same event to a
+    caller catching `RuntimeError`, and #14 must be able to survive one and not
+    the other.
+    """
+
+
+@dataclass(eq=False)
+class Refused(RuntimeError):
+    """The model returned no note — a refusal, or an empty generation.
+
+    Recoverable: it costs one sample, not the run. Opus 5 ships elevated cyber
+    safeguards and this corpus is `rotate_payments_key`, `refund_auth_header_audit`
+    and `.env` secrets, so this is live rather than theoretical.
+
+    Carries what the call billed, because the call happened either way and #14
+    multiplies measured spend — the precedent `attacker.AttackFailure` sets.
+    `eq=False` keeps `BaseException`'s identity equality and hashability.
+    """
+
+    message: str
+    usage: Usage = field(default_factory=lambda: Usage(0, 0, 0, 0))
+    stop_reason: str = ""
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def _check(condition: str) -> str:
@@ -136,13 +171,18 @@ def prompt_hash(condition: str) -> str:
     return hashlib.sha256("\n\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def _text(reply) -> str:
-    """The note. Thinking blocks are not text blocks and never reach the note."""
+def _text(reply, usage: Usage) -> str:
+    """The note. Thinking blocks are not text blocks and never reach the note.
+
+    Takes `usage` only to attach it to `Refused`: the call billed whether or not
+    it produced a note, and a refusal whose spend is not logged is spend #14
+    cannot see.
+    """
     note = "".join(b.text for b in reply.content if b.type == "text").strip()
     if reply.stop_reason == "max_tokens":
         # Checked before emptiness: a truncated note is the dangerous case
         # precisely because it looks like a complete one. See the module docstring.
-        raise RuntimeError(
+        raise Truncated(
             f"note truncated at max_tokens={MAX_TOKENS} — a partial note biases "
             "T1/T2/T3 downward and the denominator counts it anyway"
         )
@@ -151,8 +191,11 @@ def _text(reply) -> str:
         #
         # Do NOT add `fallbacks` to catch the refusal. It would silently run the
         # refused transcript on a second model and put two defenders in one
-        # results table. A refusal is a loud failure here on purpose.
-        raise RuntimeError(f"no note in reply (stop_reason={reply.stop_reason!r})")
+        # results table. A refusal is a loud failure here on purpose — but a
+        # *recoverable* one, which is why it is not a `Truncated`.
+        raise Refused(
+            f"no note in reply (stop_reason={reply.stop_reason!r})", usage, reply.stop_reason
+        )
     return note
 
 
@@ -177,7 +220,10 @@ def distill(
 ) -> Distillation:
     """Distil `rendered` into a handoff note under `condition`."""
     reply = client.messages.create(**request(rendered, condition, model=model, effort=effort))
-    note, usage = _text(reply), _usage(reply.usage)
+    # Billed before it is validated: the call happened either way, and a refusal
+    # that drops its tokens on the floor is spend the pilot gate cannot see.
+    usage = _usage(reply.usage)
+    note = _text(reply, usage)
     if condition != "C3":
         return Distillation(note, usage, 0, reply.stop_reason)
     result = scrub(note)
@@ -197,6 +243,7 @@ def run(
     model: str = MODEL,
     effort: str = EFFORT,
     scrub: Callable[[str], object] = _scrub,
+    on_refusal: Callable[[str, int, Refused], None] | None = None,
 ) -> list[Path]:
     """Every (condition, sample) for one transcript, skipping what `store` already has.
 
@@ -207,35 +254,65 @@ def run(
     deliberately reads neither the clock nor git — a value stamped at write time
     cannot be reproduced later. Taking them here keeps this loop deterministic
     and pushes the two non-reproducible reads out to #14, which owns the run.
+
+    `on_refusal` is a parameter for exactly one caller, on the precedent
+    `attacker.run`'s `stage` sets. #14 must not abort on a refused note — it has
+    already spent the money and would report nothing — so it passes a collector
+    and the loop carries on. Everyone else gets the raise. **A `Truncated` always
+    propagates**, whatever is passed: it says `MAX_TOKENS` is wrong for this
+    corpus, and the remaining calls under a broken ceiling are not measurements.
+
+    Either way the refusal's tokens are written to `runs/` before anything else
+    happens to them. The record carries `"failed"` and **no note**, so `failed()`
+    keeps it out of #13, where an empty note would score clean against a full
+    denominator and deflate T1 and T2 with nothing to show for it.
     """
     written = []
     for condition in conditions:
         for sample in range(samples):
             if store.exists(STAGE, condition, transcript, sample):
                 continue
-            out = distill(rendered, condition, client, model=model, effort=effort, scrub=scrub)
-            written.append(
-                store.write(
+
+            def record(output: str, usage: Usage, stop_reason: str, raw: str = "") -> Path:
+                return store.write(
                     RunRecord(
                         stage=STAGE,
                         condition=condition,
                         transcript=transcript,
                         sample=sample,
-                        output=out.note,
+                        output=output,
                         model=model,
                         effort=effort,
                         prompt_hash=prompt_hash(condition),
-                        usage=out.usage,
+                        usage=usage,
                         git_sha=git_sha,
                         created_at=created_at,
+                        stop_reason=stop_reason,
                         # C3's pre-scrub generation; "" elsewhere, where `output`
                         # already is it. Keeps `output` meaning "what the attacker
                         # sees" so #11 cannot leak an unscrubbed C3 note, and keeps
                         # the redaction count re-derivable without a second call.
-                        raw_output=out.raw,
+                        raw_output=raw,
                     )
                 )
-            )
+
+            try:
+                out = distill(rendered, condition, client, model=model, effort=effort, scrub=scrub)
+            except Refused as refusal:
+                # Log the spend first: raising without it loses a billed call from
+                # the number #14 projects, and re-pays it on resume.
+                written.append(
+                    record(
+                        json.dumps({"failed": refusal.message}, indent=2, sort_keys=True),
+                        refusal.usage,
+                        refusal.stop_reason,
+                    )
+                )
+                if on_refusal is None:
+                    raise
+                on_refusal(condition, sample, refusal)
+                continue
+            written.append(record(out.note, out.usage, out.stop_reason, out.raw))
     return written
 
 
