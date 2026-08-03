@@ -551,6 +551,57 @@ def test_the_prefix_factor_is_solved_from_the_measured_cache_writes():
     assert 2.0 < prefix.value < 4.0
 
 
+def test_one_prefix_is_written_once_and_a_second_write_is_a_ttl_expiry():
+    """The write per transcript is the **largest** record's, never the sum.
+
+    #10 writes one prefix per transcript by design, so a second write is a TTL
+    expiry or a resumed run re-paying for the same prefix — it says how many
+    times the prefix was written, not how big it is. Summing turns a gap in one
+    transcript's calls into a claim about prefix *size*, and a gap does not
+    arrive evenly across the pair: here the short transcript's second write
+    alone makes the solve read `k = -0.20`, degrade to the character ratio, and
+    label a measured term `[ASSUMED]`.
+    """
+    expired = PAIR + (_defender("a", 2, 100, 50, write=300),)
+    prefix = project(expired, SIZES).factors[PREFIX]
+
+    assert prefix.measured
+    assert "100 + 0.200/char" in prefix.derivation
+    assert prefix.value == pytest.approx(2800 / 800)
+
+
+@pytest.mark.parametrize(
+    "short_write, long_write, why",
+    [
+        (500, 300, "k <= 0: the longer transcript wrote the smaller prefix"),
+        (300, 900, "spec < 0: the solve implies a negative fixed cost"),
+    ],
+)
+def test_a_degenerate_prefix_solve_falls_back_rather_than_projecting_nonsense(
+    short_write, long_write, why
+):
+    """Both halves of the guard, and neither was held by anything.
+
+    A prefix that shrinks with transcript length, or one whose constant term is
+    negative, is a measurement too noisy to trust rather than a model — and
+    extrapolating either produces a projection with no physical reading. The
+    fallback is the character ratio, and the point is that it says so.
+    """
+    records = (
+        _defender("a", 0, 100, 50, write=short_write),
+        _defender("a", 1, 100, 50, read=short_write),
+        _defender("b", 0, 200, 100, write=long_write),
+        _defender("b", 1, 200, 100, read=long_write),
+    )
+    extrapolation = project(records, SIZES)
+    prefix = extrapolation.factors[PREFIX]
+
+    assert not prefix.measured, why
+    assert prefix.value == extrapolation.factors[CHARS].value
+    assert "prefix model unsolved, assuming pure chars" in prefix.derivation
+    assert PREFIX in {f.name for f in extrapolation.assumed}
+
+
 def test_the_defender_input_is_a_per_call_constant_not_a_transcript():
     """`input_tokens` is the post-breakpoint remainder — C2's instruction and
     per-call structure — so it scales by count. Chars would overstate it."""
