@@ -842,6 +842,44 @@ def test_a_zero_measurement_falls_back_instead_of_raising():
     assert factors[NOTES].measured  # and only the fit that saw the zero degrades
 
 
+# A refusal's stored body, byte for byte what `defender.run` writes: no note,
+# and `runs.failed` keys on the shape rather than on the message.
+REFUSAL_BODY = json.dumps({"failed": "the model returned no note"}, indent=2, sort_keys=True)
+
+# Wide notes, so a refusal's ~44-character JSON stub sits against something the
+# size of a real handoff note. Both fits are exactly e = 1 before it arrives.
+WIDE = (
+    _defender("a", 0, 100, 600, write=300),
+    _defender("a", 1, 100, 600, read=300),
+    _defender("b", 0, 200, 1200, write=500),
+    _defender("b", 1, 200, 1200, read=500),
+)
+
+
+def test_a_refused_note_is_excluded_from_both_fits():
+    """It carries no note, and its output tokens are what a refusal cost rather
+    than a measurement of what a transcript that length makes the model write.
+
+    Non-vacuous by construction: the *same* record — same tokens, same body
+    length, differing only in being the `{"failed": ...}` shape — is not
+    excluded, and drags both fits well off e = 1.
+    """
+    refusal = replace(_defender("b", 2, 50, 0), output=REFUSAL_BODY)
+    counterfeit = replace(refusal, output="n" * len(REFUSAL_BODY))
+
+    excluded = project(WIDE + (refusal,), SIZES).factors
+    included = project(WIDE + (counterfeit,), SIZES).factors
+
+    assert "elasticity +1.00" in excluded[THINKING].derivation
+    assert "elasticity +1.00" in excluded[NOTES].derivation
+    assert (excluded[THINKING].value, excluded[NOTES].value) == pytest.approx((4.0, 4.0))
+    # The refusal is the cheapest generation in the run and the shortest body in
+    # it, and it lands on the *long* transcript: both fits flatten.
+    assert "elasticity +0.58" in included[THINKING].derivation
+    assert included[THINKING].value < 4.0
+    assert included[NOTES].value < 4.0
+
+
 def test_a_pilot_with_no_lever_arm_returns_none_rather_than_dividing_by_zero():
     """`sxx <= 0` is the guard between the fit and a `ZeroDivisionError`.
 
