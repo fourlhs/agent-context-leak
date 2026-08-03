@@ -51,7 +51,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from src.runs import RunRecord, RunStore, Usage
+from src.runs import RunRecord, RunStore, Usage, failed
 
 PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -123,19 +123,6 @@ class Refused(RuntimeError):
 
     def __str__(self) -> str:
         return self.message
-
-
-def failed(record: RunRecord) -> bool:
-    """Whether a stored record logs a failure rather than a note.
-
-    Deliberately the same shape `attacker.failed` reads, so `aggregate` keeps one
-    predicate: a defender failure record must never reach #13 as a note, where it
-    would score clean against a full denominator and deflate T1 and T2 silently.
-    """
-    try:
-        return "failed" in json.loads(record.output)
-    except ValueError:
-        return False
 
 
 def _check(condition: str) -> str:

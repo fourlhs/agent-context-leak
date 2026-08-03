@@ -76,7 +76,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from src.runs import RunRecord, RunStore, Usage
+from src.runs import RunRecord, RunStore, Usage, failed
 
 PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -413,14 +413,6 @@ def _failure_records(failure: AttackFailure) -> tuple[str, str]:
         sort_keys=True,
     )
     return output, _turns_text(failure.turns, failure.stop_reasons)
-
-
-def failed(record: RunRecord) -> bool:
-    """Whether a stored record logs a failure rather than a result."""
-    try:
-        return "failed" in json.loads(record.output)
-    except ValueError:
-        return False
 
 
 def run(

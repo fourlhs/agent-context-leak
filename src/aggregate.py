@@ -135,11 +135,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.attacker import failed
 from src.control import Rate, StripError, net_by_category, strip
 from src.manifest import Canary
 from src.manifest import load as load_canaries
-from src.runs import RUNS, RunRecord, RunStore
+from src.runs import RUNS, RunRecord, RunStore, failed
 from src.runs import git_sha as head_sha
 
 # MARKER_SEPARATOR moves to src.manifest in #44, which re-exports it — this side
@@ -304,7 +303,9 @@ def _units(records: Iterable[RunRecord]) -> tuple[list[tuple], dict]:
     # A defender failure record is spend, not a note (#14). Scoring its `"failed"`
     # JSON as a note would find no canary in it, score it clean, and count it in
     # every exposure-conditioned denominator anyway — T1 and T2 deflated with
-    # nothing in the CSV to say so. Same predicate as the attacker's, one concept.
+    # nothing in the CSV to say so. `runs.failed` is the one predicate every stage
+    # writes to and every consumer reads: it gates a denominator here, so two
+    # copies drifting apart would move every rate at once.
     defenders = {k: r for k, r in by_stage.get("defender", {}).items() if not failed(r)}
     attacks = by_stage.get("attacker", {})
     units = [("observed", key, note, attacks.get(key)) for key, note in defenders.items()]
