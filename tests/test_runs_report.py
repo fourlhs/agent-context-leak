@@ -102,9 +102,11 @@ def test_cache_reads_are_priced_at_the_reduced_rate():
     )
 
     assert cost(as_input) == pytest.approx(5.00)
-    # 0.1x, not 1x — treating a cache read as full-price input would inflate
-    # the defender bill by ~10x on the cached prefix.
-    assert cost(as_cache_read) == pytest.approx(5.00 * CACHE_READ_MULTIPLIER)
+    # 0.50, hand-computed: 1 MTok at $5.00 x 0.1. Writing it as
+    # `5.00 * CACHE_READ_MULTIPLIER` puts the constant on both sides of the
+    # assertion, so a wrong multiplier proves itself.
+    assert cost(as_cache_read) == pytest.approx(0.50)
+    assert CACHE_READ_MULTIPLIER == 0.1
     assert cost(as_cache_read) < cost(as_input)
 
 
@@ -120,7 +122,10 @@ def test_cache_writes_are_priced_at_the_premium_rate():
     )
 
 
-    assert cost(as_cache_write) == pytest.approx(5.00 * CACHE_WRITE_MULTIPLIER)
+    # 6.25, hand-computed: 1 MTok at $5.00 x 1.25, and not spelled with the
+    # constant this assertion exists to check.
+    assert cost(as_cache_write) == pytest.approx(6.25)
+    assert CACHE_WRITE_MULTIPLIER == 1.25
 
 
 def test_unpriced_model_raises_rather_than_costing_nothing():
@@ -170,7 +175,52 @@ def test_provenance_warning_covers_model_and_prompt_hash():
 
     assert provenance_warnings(mixed) == [
         "defender mixes model: claude-opus-5, claude-sonnet-5",
-        "defender mixes prompt_hash: a1b2c3d4, deadbeef",
+        # Per condition, not per stage: both records are C1, so this is a real
+        # drift rather than C2 being C2.
+        "defender/C1 mixes prompt_hash: a1b2c3d4, deadbeef",
+    ]
+
+
+def test_c2_having_its_own_prompt_hash_is_not_a_warning():
+    """It is supposed to: C2 appends its instruction and C1/C3 share a hash by
+    construction. Checked per stage this fires on every real defender run, and
+    #14 folds these warnings into the gate's own exit code — so a permanent
+    false positive would make the gate permanently red."""
+    by_condition = (
+        DEFENDER,
+        replace(DEFENDER, condition="C2", prompt_hash="deadbeef"),
+        replace(DEFENDER, condition="C3"),
+    )
+
+    assert provenance_warnings(by_condition) == []
+
+
+def test_the_attackers_prompt_hash_is_still_checked_across_the_whole_stage():
+    """`attacker.prompt_hash()` takes no condition, so it has nothing legitimate
+    to vary with. And `pilot.run` iterates condition-major inside each transcript,
+    so an edit to `prompts/attack.md` mid-run lands cleanly on a condition
+    boundary — a per-condition check would not see it at all."""
+    mid_run_edit = (
+        replace(DEFENDER, stage="attacker", condition="C1"),
+        replace(DEFENDER, stage="attacker", condition="C2", prompt_hash="deadbeef"),
+        replace(DEFENDER, stage="attacker", condition="C3", prompt_hash="deadbeef"),
+    )
+
+    assert provenance_warnings(mid_run_edit) == [
+        "attacker mixes prompt_hash: a1b2c3d4, deadbeef"
+    ]
+
+
+def test_the_control_arm_is_checked_the_same_way_as_the_attacker():
+    """It runs the attacker's own prompt through `attacker.run`, so it inherits
+    the same invariant and must not inherit the defender's exception."""
+    mid_run_edit = (
+        replace(DEFENDER, stage="control", condition="C1"),
+        replace(DEFENDER, stage="control", condition="C2", prompt_hash="deadbeef"),
+    )
+
+    assert provenance_warnings(mid_run_edit) == [
+        "control mixes prompt_hash: a1b2c3d4, deadbeef"
     ]
 
 

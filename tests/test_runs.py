@@ -4,7 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from src.runs import RUNS, RunRecord, RunStore, Usage
+from src import attacker, defender
+from src.runs import RUNS, RunRecord, RunStore, Usage, failed
 
 USAGE = Usage(
     input_tokens=1200,
@@ -272,3 +273,31 @@ def test_samples_sort_in_order(store):
         store.write(replace(RECORD, sample=sample))
 
     assert [r.sample for r in store.read_all()] == [0, 2, 10]
+
+
+# ------------------------------------------------------------------- failed()
+
+
+def test_failed_reads_the_shape_every_stage_writes():
+    """The defender, the attacker and the control arm all write `{"failed": ...}`.
+    One predicate, because it now gates a *denominator* rather than merely
+    skipping an attack: `aggregate` drops a failed defender record out of #13's
+    note set entirely."""
+    assert failed(replace(RECORD, output=json.dumps({"failed": "refusal"})))
+    assert not failed(replace(RECORD, output="### What changed\nA real note.\n"))
+
+
+def test_failed_is_the_only_copy_of_itself():
+    """It used to be duplicated verbatim in two modules, with `aggregate`
+    importing one and `pilot` calling the other, and a comment asserting they
+    were one concept while nothing enforced it."""
+    assert attacker.failed is failed
+    assert defender.failed is failed
+
+
+@pytest.mark.parametrize("output", ["null", "[]", '"failed"', "3", "true"])
+def test_a_json_document_that_is_not_an_object_is_not_a_failure(output):
+    """`json.loads` returns whatever the document says. A bare `null` makes
+    `"failed" in data` raise `TypeError`, and the legal JSON *string* `"failed"`
+    would answer True — silently deleting a real note from every denominator."""
+    assert not failed(replace(RECORD, output=output))
