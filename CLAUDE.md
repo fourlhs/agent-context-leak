@@ -457,8 +457,8 @@ column; a note carrying the tail without the label is not a near miss either —
 
 ## Budget
 
-Full run is 3 conditions × ~18 transcripts × 5 samples = **270 defender calls**, then up to 3
-attacker turns per note = **~810 attacker turns**, doubled to ~1620 by the control arm.
+Full run is 3 conditions × 20 transcripts × 5 samples = **300 defender calls**, then up to 3
+attacker turns per note = **~900 attacker turns**, doubled to ~1800 by the control arm.
 
 Order-of-magnitude estimate, both agents on Opus 5 at `medium` effort:
 
@@ -487,9 +487,11 @@ gets the input side exactly right and hand-waves the output term has aimed its p
 the budget.
 
 **The multiplier is fitted, never named (#55).** "Multiply by 9" was wrong for the pair this gate
-used to pilot: the corpus is bimodal — sixteen transcripts at 6,052–7,021 chars, two at 11,404 and
-13,076 — and `24,480 × 9 = 220,320` against a corpus of `127,287` overstates the defender's *input*
-bill by 73%. But the deeper problem was that a flat count on the **output** term asserts, silently,
+used to pilot: at 18 transcripts the corpus was bimodal — sixteen at 6,052–7,021 chars, two at 11,404
+and 13,076 — and `24,480 × 9 = 220,320` against a corpus of `127,287` overstated the defender's
+*input* bill by 73%. (#56 has since added two at 8,175 and 8,476, so the gap is no longer empty; the
+argument stands, and none of these numbers is an input — every factor is derived from the corpus at
+run time.) But the deeper problem was that a flat count on the **output** term asserts, silently,
 that per-call output does not depend on transcript length. Let `e` be the elasticity of a quantity to
 transcript length; the honest multiplier is `F(e) = Σ L_i^e over the corpus / Σ L_j^e over the
 pilot`, and **`F(0)` is the transcript count ratio while `F(1)` is the character ratio** — the two
