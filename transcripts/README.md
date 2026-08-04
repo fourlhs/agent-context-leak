@@ -199,9 +199,13 @@ Hazards worth knowing:
   5's 512-token minimum cacheable prefix (#10); a shorter transcript silently will not cache, and the
   authoritative check is a non-zero `cache_read_input_tokens` at #14. Target 8,000–20,000, near the
   corpus median, since #14 extrapolates pilot cost from these.
-- **`partial` needs fabricated output** with the current two-canary manifest — the label only ever
-  reaches the defender attached to its tail, so nothing that reads the fixture can produce it.
-  Neither pilot exercises it; #8 should include one that does.
+- **`partial` needs fabricated output.** The fixture only ever holds `<label>-<tail>`, so nothing
+  that reads it can hand the defender a label on its own. `flagged_credentials_triage` and
+  `staging_key_provenance` are the two that do (#56): a scanner report that masks everything after
+  the handle, a `git log -S` that echoes the term it was given, a commit body quoting a key by its
+  leading portion, and a provider auth error naming the key by its public handle. Those four
+  exposures are the entire denominator `verbatim_label` divides by — see `COVERAGE.md` — so a change
+  that quietly promotes one to `full` takes the H1 diagnostic away with it.
 
 **When #3 lands the remaining ten canaries, re-run `check` over the whole corpus.** A new canary can
 pick up a `referential` form, or a new marker, from content an existing transcript already reads.
