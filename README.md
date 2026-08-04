@@ -81,8 +81,8 @@ is the source of truth — so an unscrubbed real session pasted into one, or a r
 other while authoring a canary, would be one `git add -A` away from a permanent public commit.
 `src/transcript_guard.py` reads the **staged** bytes of anything under those two directories and
 reports an undeclared high-entropy token, a credential behind a secret-named key, a vendor key
-prefix, a home directory that is not one of the synthetic ones, or a hostname outside the reserved
-`.example` / `.internal` TLDs. The manifest supplies the whitelist, so the declared canaries pass and
+prefix, a PEM private-key header, a home directory that is not one of the synthetic ones, or a
+hostname outside the reserved `.example` / `.internal` TLDs. The manifest supplies the whitelist, so the declared canaries pass and
 everything else does not. Every rule is written for JSON first, because that is the only format the
 corpus has.
 
